@@ -723,7 +723,7 @@ class BrokerState:
             capture_output=True, text=True,
             creationflags=CREATE_NO_WINDOW, check=False,
         )
-        deadline = time.time() + 10
+        deadline = time.time() + 20
         while time.time() < deadline:
             if not self.whisper_is_running():
                 self._log("whisper-server stopped")
@@ -877,13 +877,15 @@ class BrokerState:
             )
         self._log(f"Started llama-server process (pid={process.pid}, profile={profile})")
 
-        deadline = time.time() + 180
+        startup_timeout = 360  # large models with big ctx can take 4-6 min
+        self._log(f"Waiting up to {startup_timeout}s for llama-server health endpoint")
+        deadline = time.time() + startup_timeout
         while time.time() < deadline:
             if self.llama_is_ready():
                 self._log("llama-server health endpoint is ready")
                 return
             time.sleep(3)
-        raise RuntimeError("Timed out waiting for llama-server to become ready")
+        raise RuntimeError(f"Timed out waiting for llama-server to become ready after {startup_timeout}s")
 
     def _warmup_llama_server(self) -> None:
         try:
