@@ -171,6 +171,7 @@ else {
         $llamaArgs = @(
             "--model",               $modelFile,
             "--mmproj",              $mmProjFile,
+            "--no-mmproj-offload",
             "--ctx-size",            $ctxSize,
             "--slot-save-path",      $slotCachePath,
             "--parallel",            "1",
@@ -184,6 +185,8 @@ else {
         )
         $lookupCachePath = Join-Path $openclawRoot "lookup-cache.bin"
         $llamaArgs += @("--lookup-cache-dynamic", $lookupCachePath)
+        # Speculative decoding: ngram-mod (lossless, no draft model needed)
+        $llamaArgs += @("--spec-type", "ngram-mod", "--spec-ngram-size-n", "24", "--draft-min", "12", "--draft-max", "48")
         # Model-specific flags
         if ($useModel -in @("qwen36","qwen36q4","qwen36_27b")) {
             $llamaArgs += @("--ubatch-size", "2048")

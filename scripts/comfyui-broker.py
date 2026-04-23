@@ -799,7 +799,7 @@ class BrokerState:
         ]
 
         if self.config.llama_mmproj and self.config.llama_mmproj.exists():
-            args.extend(["--mmproj", str(self.config.llama_mmproj)])
+            args.extend(["--mmproj", str(self.config.llama_mmproj), "--no-mmproj-offload"])
 
         args.extend(
             [
@@ -826,6 +826,9 @@ class BrokerState:
         # Lookup decoding: lossless n-gram speculative acceleration (zero quality loss)
         lookup_cache = Path(self.config.llama_server_exe.parent).parent / "lookup-cache.bin"
         args.extend(["--lookup-cache-dynamic", str(lookup_cache)])
+
+        # Speculative decoding: ngram-mod (lossless, no draft model needed)
+        args.extend(["--spec-type", "ngram-mod", "--spec-ngram-size-n", "24", "--draft-min", "12", "--draft-max", "48"])
 
         # Keep restart args aligned with start-openclaw.ps1 profile branches.
         if profile == "qwen35":
