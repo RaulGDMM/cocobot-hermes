@@ -799,7 +799,7 @@ class BrokerState:
         ]
 
         if self.config.llama_mmproj and self.config.llama_mmproj.exists():
-            args.extend(["--mmproj", str(self.config.llama_mmproj), "--no-mmproj-offload"])
+            args.extend(["--mmproj", str(self.config.llama_mmproj)])
 
         args.extend(
             [

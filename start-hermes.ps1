@@ -114,7 +114,7 @@ if ($useModel -eq "qwen36") {
 } elseif ($useModel -eq "qwen36_27b") {
     $modelLabel    = "Qwen3.6-27B-UD-Q4_K_XL"
     $modelSize     = "17.6 GB, vision+thinking, dense 27B, Unsloth Dynamic 2.0, KV Q8_0+rot"
-    $ctxSize       = "262144"
+    $ctxSize       = "200000"
 } elseif ($useModel -eq "gemma4") {
     $modelLabel    = "Gemma 4 31B-it UD-Q4_K_XL"
     $modelSize     = "17.5 GB, vision+thinking"
@@ -171,7 +171,6 @@ else {
         $llamaArgs = @(
             "--model",               $modelFile,
             "--mmproj",              $mmProjFile,
-            "--no-mmproj-offload",
             "--ctx-size",            $ctxSize,
             "--slot-save-path",      $slotCachePath,
             "--parallel",            "1",
