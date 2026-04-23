@@ -568,7 +568,7 @@ class BrokerState:
             whisper_was_running = self.whisper_is_running()
             self._log(f"Starting batch of {len(batch)} job(s); llama_running={llama_was_running}, whisper_running={whisper_was_running}")
             if whisper_was_running:
-                self._stop_whisper_server()
+                self._stop_whisper_server(blocking=False)
             if llama_was_running:
                 self._log("Stopping llama-server to free VRAM")
                 self._stop_llama_server()
@@ -710,12 +710,12 @@ class BrokerState:
     def whisper_is_running(self) -> bool:
         return url_ok(f"http://127.0.0.1:{self._WHISPER_PORT}/health", timeout=2.0)
 
-    def _stop_whisper_server(self) -> None:
+    def _stop_whisper_server(self, blocking: bool = True) -> None:
         if not self.whisper_is_running():
             return
         self._log("Stopping whisper-server to free RAM")
         # Kill the Python process listening on the whisper port
-        result = subprocess.run(
+        subprocess.run(
             ["powershell", "-NoProfile", "-Command",
              f"Get-NetTCPConnection -LocalPort {self._WHISPER_PORT} -ErrorAction SilentlyContinue "
              f"| Select-Object -ExpandProperty OwningProcess -Unique "
@@ -723,6 +723,9 @@ class BrokerState:
             capture_output=True, text=True,
             creationflags=CREATE_NO_WINDOW, check=False,
         )
+        if not blocking:
+            self._log("whisper-server kill signal sent (non-blocking)")
+            return
         deadline = time.time() + 20
         while time.time() < deadline:
             if not self.whisper_is_running():
@@ -941,7 +944,7 @@ class BrokerState:
             whisper_was_running = self.whisper_is_running()
             self._log(f"gpu-exec {job.job_id}: starting command; llama_running={llama_was_running}, whisper_running={whisper_was_running}")
             if whisper_was_running:
-                self._stop_whisper_server()
+                self._stop_whisper_server(blocking=False)
             if llama_was_running:
                 self._log("Stopping llama-server to free VRAM for gpu-exec")
                 self._stop_llama_server()
