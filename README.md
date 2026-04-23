@@ -38,7 +38,7 @@ Windows                              WSL (Ubuntu)
 - **Windows Terminal** (for tabbed experience — pre-installed on Win 11)
 - **NVIDIA GPU** with 16+ GB VRAM (for 27B model) or 24+ GB (for 35B MoE)
 - **[llama.cpp](https://github.com/ggerganov/llama.cpp)** built with CUDA — place `llama-server.exe` in `../Openclaw/llama-cpp/`
-- **A GGUF model** — default: [Qwen3.6-27B-UD-Q4_K_XL](https://huggingface.co/unsloth/Qwen3.6-27B-GGUF) in `../Openclaw/models/qwen36-27b/`
+- **A GGUF model** — recommended: [Qwen3.6-27B-UD-Q4_K_XL](https://huggingface.co/unsloth/Qwen3.6-27B-GGUF) (17.6 GB, vision+thinking, 204K context) in `../Openclaw/models/qwen36-27b/`
 
 ### Optional
 
