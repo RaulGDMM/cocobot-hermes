@@ -28,8 +28,19 @@ Write-Host "  llama.cpp: $useLlamaInstall" -ForegroundColor Gray
 Write-Host "  Browser tool: $useBrowserTool" -ForegroundColor Gray
 Write-Host ""
 
-# Paths: llama-server, whisper, comfyui-broker live in Openclaw/
+# Paths: scripts in local scripts/ folder, binaries & models in Openclaw/
+$scriptsRoot = Join-Path $PSScriptRoot "scripts"
 $openclawRoot = Join-Path (Split-Path $PSScriptRoot) "Openclaw"
+
+# Helper: find a script locally first, then fall back to Openclaw
+function Find-Script {
+    param([string]$Name)
+    $local = Join-Path $scriptsRoot $Name
+    if (Test-Path $local) { return $local }
+    $fallback = Join-Path $openclawRoot $Name
+    if (Test-Path $fallback) { return $fallback }
+    return $null
+}
 
 $brokerPort = 8791
 $brokerProcess = $null
@@ -246,10 +257,10 @@ Write-Host ""
 
 # 3. Arrancar servidor Whisper
 Write-Host "[2/5] Iniciando servidor Whisper local..." -ForegroundColor Yellow
-$whisperScript = Join-Path $openclawRoot "whisper-server.py"
+$whisperScript = Find-Script "whisper-server.py"
 $whisperProcess = $null
 
-if (Test-Path $whisperScript) {
+if ($whisperScript) {
     $whisperRunning = $false
     try { $null = Invoke-RestMethod -Uri "http://localhost:8787/health" -Method Get -TimeoutSec 2 -ErrorAction Stop; $whisperRunning = $true } catch {}
 
@@ -262,19 +273,19 @@ if (Test-Path $whisperScript) {
     }
 }
 else {
-    Write-Host "[!] whisper-server.py no encontrado en $openclawRoot" -ForegroundColor Yellow
+    Write-Host "[!] whisper-server.py no encontrado" -ForegroundColor Yellow
 }
 Write-Host ""
 
 # 4. Arrancar broker local para ComfyUI
 Write-Host "[3/5] Iniciando broker local de ComfyUI..." -ForegroundColor Yellow
-$brokerScript = Join-Path $openclawRoot "comfyui-broker.py"
-$brokerWindowScript = Join-Path $openclawRoot "start-comfyui-broker-window.ps1"
+$brokerScript = Find-Script "comfyui-broker.py"
+$brokerWindowScript = Find-Script "start-comfyui-broker-window.ps1"
 $brokerPython = "C:\ComfyUI\.venv\Scripts\python.exe"
-$brokerLogFile = Join-Path $openclawRoot "comfyui-broker.log"
-$brokerModelPathsConfig = Join-Path $openclawRoot "comfyui-extra-model-paths.yaml"
+$brokerLogFile = Join-Path $PSScriptRoot "comfyui-broker.log"
+$brokerModelPathsConfig = Find-Script "comfyui-extra-model-paths.yaml"
 
-if (Test-Path $brokerScript) {
+if ($brokerScript) {
     $brokerRunning = $false
     try {
         $null = Invoke-RestMethod -Uri "http://localhost:${brokerPort}/health" -Method Get -TimeoutSec 2 -ErrorAction Stop
@@ -300,7 +311,7 @@ if (Test-Path $brokerScript) {
         if (-not (Test-Path $brokerPython)) {
             Write-Host "[!] No se encuentra el Python de ComfyUI: $brokerPython" -ForegroundColor Red
         }
-        elseif (-not (Test-Path $brokerWindowScript)) {
+        elseif (-not $brokerWindowScript -or -not (Test-Path $brokerWindowScript)) {
             Write-Host "[!] No se encuentra el lanzador visual del broker: $brokerWindowScript" -ForegroundColor Red
         }
         else {
@@ -316,7 +327,7 @@ if (Test-Path $brokerScript) {
             $env:OPENCLAW_COMFYUI_OUTPUT_DIR = "C:\ComfyUI\output"
             $env:OPENCLAW_COMFYUI_PYTHON = "C:\ComfyUI\.venv\Scripts\python.exe"
             $env:OPENCLAW_COMFYUI_APP_DIR = "E:\Programs\ComfyUI\resources\ComfyUI"
-            if (Test-Path $brokerModelPathsConfig) { $env:OPENCLAW_COMFYUI_EXTRA_MODEL_PATHS_CONFIG = $brokerModelPathsConfig }
+            if ($brokerModelPathsConfig -and (Test-Path $brokerModelPathsConfig)) { $env:OPENCLAW_COMFYUI_EXTRA_MODEL_PATHS_CONFIG = $brokerModelPathsConfig }
             $env:OPENCLAW_COMFYUI_HOST = "127.0.0.1"
             $env:OPENCLAW_COMFYUI_PORT = "8000"
             $env:OPENCLAW_USE_BACKEND = "llama-server"
@@ -366,14 +377,14 @@ if (Test-Path $brokerScript) {
     }
 }
 else {
-    Write-Host "[!] comfyui-broker.py no encontrado en $openclawRoot" -ForegroundColor Yellow
+    Write-Host "[!] comfyui-broker.py no encontrado" -ForegroundColor Yellow
 }
 Write-Host ""
 
 # 5. Arrancar Wyoming STT bridge
 Write-Host "[4/5] Iniciando Wyoming STT Bridge (puerto 10300)..." -ForegroundColor Yellow
-$wyomingSttScript = Join-Path $openclawRoot "wyoming-whisper-bridge.py"
-if (Test-Path $wyomingSttScript) {
+$wyomingSttScript = Find-Script "wyoming-whisper-bridge.py"
+if ($wyomingSttScript) {
     $sttRunning = $false
     try {
         $sock = New-Object System.Net.Sockets.TcpClient
@@ -384,9 +395,10 @@ if (Test-Path $wyomingSttScript) {
     if ($sttRunning) {
         Write-Host "[OK] Wyoming STT Bridge ya esta corriendo" -ForegroundColor Green
     } else {
-        $driveLetter = $openclawRoot.Substring(0,1).ToLower()
-        $wslScriptDir = "/mnt/$driveLetter" + ($openclawRoot.Substring(2) -replace '\\','/')
-        $sttProc = Start-Process wsl.exe -ArgumentList "-d", "Ubuntu", "--", "python3", "$wslScriptDir/wyoming-whisper-bridge.py", "--whisper-url", "http://host.docker.internal:8787", "--port", "10300" -WindowStyle Hidden -PassThru
+        $sttDir = Split-Path $wyomingSttScript
+        $sttDriveLetter = $sttDir.Substring(0,1).ToLower()
+        $wslSttDir = "/mnt/$sttDriveLetter" + ($sttDir.Substring(2) -replace '\\','/')
+        $sttProc = Start-Process wsl.exe -ArgumentList "-d", "Ubuntu", "--", "python3", "$wslSttDir/wyoming-whisper-bridge.py", "--whisper-url", "http://host.docker.internal:8787", "--port", "10300" -WindowStyle Hidden -PassThru
         $wyomingSttPid = $sttProc.Id
         Write-Host "[OK] Wyoming STT Bridge lanzado (PID: $wyomingSttPid, puerto 10300)" -ForegroundColor Green
     }
@@ -397,8 +409,8 @@ Write-Host ""
 
 # 6. Arrancar Wyoming TTS bridge
 Write-Host "[5/5] Iniciando Wyoming TTS Bridge (puerto 10200)..." -ForegroundColor Yellow
-$wyomingTtsScript = Join-Path $openclawRoot "wyoming-edge-tts-bridge.py"
-if (Test-Path $wyomingTtsScript) {
+$wyomingTtsScript = Find-Script "wyoming-edge-tts-bridge.py"
+if ($wyomingTtsScript) {
     $ttsRunning = $false
     try {
         $sock = New-Object System.Net.Sockets.TcpClient
@@ -409,11 +421,10 @@ if (Test-Path $wyomingTtsScript) {
     if ($ttsRunning) {
         Write-Host "[OK] Wyoming TTS Bridge ya esta corriendo" -ForegroundColor Green
     } else {
-        if (-not $wslScriptDir) {
-            $driveLetter = $openclawRoot.Substring(0,1).ToLower()
-            $wslScriptDir = "/mnt/$driveLetter" + ($openclawRoot.Substring(2) -replace '\\','/')
-        }
-        $ttsProc = Start-Process wsl.exe -ArgumentList "-d", "Ubuntu", "--", "python3", "$wslScriptDir/wyoming-edge-tts-bridge.py", "--port", "10200" -WindowStyle Hidden -PassThru
+        $ttsDir = Split-Path $wyomingTtsScript
+        $ttsDriveLetter = $ttsDir.Substring(0,1).ToLower()
+        $wslTtsDir = "/mnt/$ttsDriveLetter" + ($ttsDir.Substring(2) -replace '\\','/')
+        $ttsProc = Start-Process wsl.exe -ArgumentList "-d", "Ubuntu", "--", "python3", "$wslTtsDir/wyoming-edge-tts-bridge.py", "--port", "10200" -WindowStyle Hidden -PassThru
         $wyomingTtsPid = $ttsProc.Id
         Write-Host "[OK] Wyoming TTS Bridge lanzado (PID: $wyomingTtsPid, puerto 10200)" -ForegroundColor Green
     }

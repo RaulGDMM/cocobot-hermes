@@ -116,24 +116,32 @@ wsl -d Ubuntu -- bash -lc "nano ~/.hermes/.env"
 
 ### 5. Place the model and llama-server
 
-Expected directory structure (relative to this repo's parent):
+The repo includes all supporting scripts in `scripts/`. You only need to provide the llama.cpp binary and model files:
+
 ```
 Workspace/
 ├── Hermes/                    ← this repo
 │   ├── start-hermes.bat       ← double-click to start
 │   ├── start-hermes.ps1       ← main orchestrator
 │   ├── start-hermes-wsl.sh    ← WSL gateway script
-│   └── start-hermes-chat.sh   ← WSL chat TUI script
-└── Openclaw/                  ← shared resources
+│   ├── start-hermes-chat.sh   ← WSL chat TUI script
+│   └── scripts/               ← included supporting scripts
+│       ├── whisper-server.py          ← local STT server
+│       ├── comfyui-broker.py          ← ComfyUI media broker
+│       ├── start-comfyui-broker-window.ps1
+│       ├── wyoming-whisper-bridge.py  ← Wyoming STT bridge
+│       ├── wyoming-edge-tts-bridge.py ← Wyoming TTS bridge
+│       └── comfyui-extra-model-paths.yaml
+└── Openclaw/                  ← binaries & models (not included)
     ├── llama-cpp/
-    │   └── llama-server.exe   ← llama.cpp binary
-    ├── models/
-    │   └── qwen36-27b/
-    │       ├── Qwen3.6-27B-UD-Q4_K_XL.gguf
-    │       └── mmproj-BF16.gguf
-    ├── whisper-server.py      ← optional STT server
-    └── comfyui-broker.py      ← optional media broker
+    │   └── llama-server.exe   ← llama.cpp binary (build with CUDA)
+    └── models/
+        └── qwen36-27b/
+            ├── Qwen3.6-27B-UD-Q4_K_XL.gguf
+            └── mmproj-BF16.gguf
 ```
+
+> **Note:** Scripts are resolved locally first (`scripts/`), then fall back to `../Openclaw/` for backwards compatibility.
 
 ### 6. Launch
 
@@ -192,6 +200,12 @@ hermes config set memory.provider holographic
 | `start-hermes-chat.sh` | WSL script for interactive chat TUI |
 | `.env.example` | Template for API keys |
 | `config/hermes.yaml` | Agent personality config |
+| `scripts/whisper-server.py` | Local Whisper STT server (faster-whisper, port 8787) |
+| `scripts/comfyui-broker.py` | ComfyUI broker for image/video/music generation |
+| `scripts/start-comfyui-broker-window.ps1` | ComfyUI broker window launcher |
+| `scripts/wyoming-whisper-bridge.py` | Wyoming protocol STT bridge (port 10300) |
+| `scripts/wyoming-edge-tts-bridge.py` | Wyoming protocol TTS bridge (port 10200) |
+| `scripts/comfyui-extra-model-paths.yaml` | ComfyUI model paths configuration |
 
 ## How It Works
 

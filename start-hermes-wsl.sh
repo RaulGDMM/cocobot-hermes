@@ -52,22 +52,6 @@ wait_for_llama_server() {
   return 1
 }
 
-wait_for_docker() {
-  echo "[hermes] Comprobando Docker..."
-  local max_wait=60
-  local waited=0
-  while (( waited < max_wait )); do
-    if docker info >/dev/null 2>&1; then
-      echo "[OK] Docker disponible"
-      return 0
-    fi
-    sleep 2
-    waited=$((waited + 2))
-  done
-  echo "[!] Docker no disponible tras ${max_wait}s"
-  return 1
-}
-
 cleanup() {
   if (( CLEANUP_DONE )); then return; fi
   CLEANUP_DONE=1
@@ -89,9 +73,6 @@ echo "  Browser: ${USE_BROWSER_TOOL}"
 echo ""
 
 resolve_hermes_runtime
-
-# Wait for Docker (needed for terminal sandbox)
-wait_for_docker || true
 
 # Wait for llama-server to be ready
 wait_for_llama_server || true
