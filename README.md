@@ -36,9 +36,34 @@ Windows                              WSL (Ubuntu)
 
 - **Windows 10/11** with [WSL2](https://learn.microsoft.com/en-us/windows/wsl/install) (Ubuntu)
 - **Windows Terminal** (for tabbed experience — pre-installed on Win 11)
-- **NVIDIA GPU** with 16+ GB VRAM (for 27B model) or 24+ GB (for 35B MoE)
+- **NVIDIA GPU** — see [GPU Scaling Guide](#gpu-scaling-guide) below
 - **[llama.cpp](https://github.com/ggerganov/llama.cpp)** built with CUDA — place `llama-server.exe` in `../Openclaw/llama-cpp/`
-- **A GGUF model** — recommended: [Qwen3.6-27B-UD-Q4_K_XL](https://huggingface.co/unsloth/Qwen3.6-27B-GGUF) (17.6 GB, vision+thinking, 204K context) in `../Openclaw/models/qwen36-27b/`
+- **A GGUF model** — recommended: [Qwen3.6-27B](https://huggingface.co/unsloth/Qwen3.6-27B-GGUF) (vision + thinking). Choose a quantization that fits your VRAM
+
+### GPU Scaling Guide
+
+The default configuration in this repo is tuned for an **RTX 5090 (32 GB VRAM)**. You will need to adjust the model quantization and context size to match your GPU:
+
+| GPU (VRAM) | Recommended Model | Quantization | Context Size | Model Size |
+|---|---|---|---|---|
+| RTX 5090 / A100 (32+ GB) | Qwen3.6-27B | UD-Q4_K_XL | 204,800 | ~17.6 GB |
+| RTX 4090 / 3090 (24 GB) | Qwen3.6-27B | Q3_K_M or IQ4_XS | 65,536 | ~12-14 GB |
+| RTX 4080 / 3080 (16 GB) | Qwen3.6-27B | IQ2_M or Q2_K | 32,768 | ~8-10 GB |
+| RTX 4070 / 3070 (12 GB) | Qwen3.6-27B | IQ2_XXS | 16,384 | ~7 GB |
+| RTX 4060 (8 GB) | Qwen3 8B | Q4_K_M | 32,768 | ~5 GB |
+
+**To adjust**, edit `start-hermes.ps1`:
+- Change `$ctxSize` to match your available VRAM after model loading
+- Point `$modelFile` to your chosen quantization GGUF
+
+Also update Hermes config to match:
+```bash
+wsl -d Ubuntu -- bash -lc "hermes config set model.context_length YOUR_CTX_SIZE"
+```
+
+> **Tip:** Larger context = more VRAM. If you run out of VRAM, reduce context size first. The model weights must fit in VRAM; context uses the remaining space.
+
+> **Tip:** Download different quantizations from [Unsloth's Qwen3.6-27B GGUF collection](https://huggingface.co/unsloth/Qwen3.6-27B-GGUF). Smaller quants trade quality for speed/VRAM.
 
 ### Optional
 
@@ -125,6 +150,8 @@ $useModel = "qwen36_27b"     # Options: "qwen36_27b", "qwen36", "qwen36q4", "qwe
 $useLlamaInstall = "stable"  # "stable" or "latest"
 $useBrowserTool = $true      # Enable/disable Playwright browser tool
 ```
+
+> **Note:** The default model profiles and context sizes in the script are configured for an RTX 5090 (32 GB). See the [GPU Scaling Guide](#gpu-scaling-guide) to adapt them to your hardware.
 
 ### Hermes Auto-Evolution
 
