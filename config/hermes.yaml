@@ -1,0 +1,87 @@
+# Hermes Agent Configuration
+# Migrated from Openclaw (WSL) - Cocobot personality
+# This file contains the configuration for Hermes Agent
+
+agent:
+  name: "Cocobot"
+  emoji: "🥥"
+  version: "1.0.0"
+  description: "Intelligent AI Agent powered by Qwen3.5 35B A3B (migrated from Openclaw)"
+  
+model:
+  name: "qwen3.5-35b-a3b"
+  path: "/app/models/qwen3.5-27b/Qwen3.5-27B-Q4_K_M.gguf"
+  context_size: 262144
+  max_tokens: 32768
+  embedding: false
+  reasoning: true
+  
+inference:
+  temperature: 0.7
+  top_p: 0.9
+  top_k: 40
+  repeat_penalty: 1.1
+  seed: 42
+  timeout_seconds: 1200
+  
+server:
+  host: "0.0.0.0"
+  port: 3000
+  workers: 1
+  timeout: 300
+  
+llama_server:
+  url: "http://localhost:8082"
+  context_size: 262144
+  batch_size: 512
+  threads: 8
+  n_gpu_layers: 999
+  flash_attention: true
+  mmap: true
+  mlock: true
+  
+logging:
+  level: "INFO"
+  format: "{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {message}"
+  file: "/app/data/hermes.log"
+  
+tools:
+  enabled: true
+  list:
+    - web_search
+    - file_read
+    - file_write
+    - code_execution
+    - image_generation
+    - browser
+    - cron
+  
+sandbox:
+  enabled: true
+  timeout: 300
+  memory_limit: "4GB"
+  cpu_limit: 2.0
+  workspace_access: "rw"
+  
+channels:
+  telegram:
+    enabled: true
+    dm_policy: "open"
+    group_policy: "open"
+    text_chunk_limit: 4096
+    streaming: "block"
+    media_max_mb: 50
+    ack_reaction: "👀"
+  whatsapp:
+    enabled: false
+    dm_policy: "allowlist"
+    group_policy: "disabled"
+    block_streaming: true
+    media_max_mb: 50
+    
+gateway:
+  port: 18789
+  mode: "local"
+  bind: "loopback"
+  
+timezone: "Europe/Madrid"

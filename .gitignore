@@ -1,0 +1,38 @@
+# Modelos (archivos grandes)
+models/
+
+# Datos persistentes
+data/*
+!data/.gitkeep
+
+# Logs
+*.log
+logs/
+
+# Variables de entorno
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+.venv/
+env/
+.env
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Sistema
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Docker
+.docker/
