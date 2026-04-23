@@ -785,6 +785,9 @@ class BrokerState:
         if not self.config.llama_model or not self.config.llama_model.exists():
             raise RuntimeError("llama model path not configured")
 
+        # Ensure slot-save-path directory exists
+        self.config.llama_slot_save_path.mkdir(parents=True, exist_ok=True)
+
         profile = self.config.llama_profile
         if profile not in {"qwen35", "qwen36", "qwen36q4", "qwen36_27b", "gemma4"}:
             profile = "qwen35"

@@ -332,6 +332,7 @@ if ($brokerScript) {
             $env:OPENCLAW_COMFYUI_PORT = "8000"
             $env:OPENCLAW_USE_BACKEND = "llama-server"
 
+            $env:OPENCLAW_LLAMA_SLOT_SAVE_PATH = Join-Path $openclawRoot "slot-cache"
             if ($llamaServerExe) { $env:OPENCLAW_LLAMA_SERVER_EXE = $llamaServerExe }
             if ($modelFile) { $env:OPENCLAW_LLAMA_MODEL = $modelFile }
             if ($mmProjFile) { $env:OPENCLAW_LLAMA_MMPROJ = $mmProjFile }
