@@ -8,6 +8,8 @@ data/*
 # Logs
 *.log
 logs/
+comfyui-*.log
+comfyui-process.log
 
 # Variables de entorno
 .env
@@ -36,3 +38,12 @@ desktop.ini
 
 # Docker
 .docker/
+
+# Backup files (skills)
+*.backup
+*.backup.*
+
+# Large media files
+*.mp4
+*.webm
+output/

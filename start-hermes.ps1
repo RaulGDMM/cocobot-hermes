@@ -8,6 +8,13 @@ $useModel = "qwen36_27b"
 
 # Herramienta browser: $true para activarla, $false para desactivarla
 $useBrowserTool = $true
+
+# Open WebUI: $true para arrancar la interfaz web en puerto 8080
+$useOpenWebUI = $false
+
+# Whisper + Wyoming bridges (Home Assistant): $true para arrancar whisper-server y bridges STT/TTS
+# Discord y Telegram usan el STT interno de Hermes, no necesitan esto.
+$useWhisper = $false
 # -----------------------
 
 # Auto-relaunch inside Windows Terminal so all services open as tabs
@@ -26,6 +33,7 @@ Write-Host "========================================" -ForegroundColor Magenta
 Write-Host "  Modelo: $useModel" -ForegroundColor Gray
 Write-Host "  llama.cpp: $useLlamaInstall" -ForegroundColor Gray
 Write-Host "  Browser tool: $useBrowserTool" -ForegroundColor Gray
+Write-Host "  Open WebUI: $useOpenWebUI" -ForegroundColor Gray
 Write-Host ""
 
 # Paths: scripts in local scripts/ folder, binaries & models in Openclaw/
@@ -114,7 +122,7 @@ if ($useModel -eq "qwen36") {
 } elseif ($useModel -eq "qwen36_27b") {
     $modelLabel    = "Qwen3.6-27B-UD-Q4_K_XL"
     $modelSize     = "17.6 GB, vision+thinking, dense 27B, Unsloth Dynamic 2.0, KV Q8_0+rot"
-    $ctxSize       = "220000"
+    $ctxSize       = "200000"
 } elseif ($useModel -eq "gemma4") {
     $modelLabel    = "Gemma 4 31B-it UD-Q4_K_XL"
     $modelSize     = "17.5 GB, vision+thinking"
@@ -125,7 +133,7 @@ if ($useModel -eq "qwen36") {
     $ctxSize       = "131072"
 }
 
-Write-Host "[1/5] Comprobando llama-server ($modelLabel)..." -ForegroundColor Yellow
+Write-Host "[1/6] Comprobando llama-server ($modelLabel)..." -ForegroundColor Yellow
 
 $llamaRoot       = Join-Path $openclawRoot $llamaInstall.DirName
 $llamaServerExe  = Join-Path $llamaRoot "llama-server.exe"
@@ -173,7 +181,7 @@ else {
             "--mmproj",              $mmProjFile,
             "--ctx-size",            $ctxSize,
             "--slot-save-path",      $slotCachePath,
-            "--parallel",            "1",
+            "--parallel",            "2",
             "--n-gpu-layers",        "99",
             "--flash-attn",          "on",
             "--batch-size",          "2048",
@@ -182,15 +190,12 @@ else {
             "--cont-batching",
             "--log-file",            $llamaLogFile
         )
-        $lookupCachePath = Join-Path $openclawRoot "lookup-cache.bin"
-        $llamaArgs += @("--lookup-cache-dynamic", $lookupCachePath)
-        # Speculative decoding: ngram-mod (lossless, no draft model needed)
-        $llamaArgs += @("--spec-type", "ngram-mod", "--spec-ngram-size-n", "24", "--draft-min", "12", "--draft-max", "48")
         # Model-specific flags
         if ($useModel -in @("qwen36","qwen36q4","qwen36_27b")) {
             $llamaArgs += @("--ubatch-size", "2048")
             $llamaArgs += @("--jinja")
             $llamaArgs += @("--reasoning-format", "deepseek")
+            $llamaArgs += @("--image-max-tokens", "1024")
             if ($useModel -eq "qwen36_27b") {
                 $llamaArgs += @("--presence-penalty", "0")
             } else {
@@ -198,8 +203,10 @@ else {
             }
             $llamaArgs += @("--min-p", "0")
             $llamaArgs += @("--predict", "81920")
+            $llamaArgs += @("--reasoning-budget", "-1")
             $chatTemplateKwargs = '{"enable_thinking":true,"preserve_thinking":true}'
             $env:LLAMA_CHAT_TEMPLATE_KWARGS = $chatTemplateKwargs
+            $llamaArgs += @("--no-prefill-assistant")
             $llamaArgs += @("--kv-unified", "--ctx-checkpoints", "32")
             if ($useModel -eq "qwen36_27b") {
                 $llamaArgs += @("-ctk", "q8_0", "-ctv", "q8_0")
@@ -245,7 +252,8 @@ if ($useWTTabs) {
     $wslDir = "/mnt/$driveLetter" + ($PSScriptRoot.Substring(2) -replace '\\','/')
     Write-Host "  Lanzando Hermes gateway en pestana WSL..." -ForegroundColor DarkCyan
     $browserFlag = if ($useBrowserTool) { 'on' } else { 'off' }
-    wt.exe -w 0 new-tab --title "Hermes Gateway (WSL)" -- wsl.exe -d Ubuntu -- bash -lc "cd '$wslDir' && USE_MODEL='$useModel' USE_BROWSER_TOOL='$browserFlag' ./start-hermes-wsl.sh"
+    $tailscaleFlag = if ($useOpenWebUI) { 'on' } else { 'off' }
+    wt.exe -w 0 new-tab --title "Hermes Gateway (WSL)" -- wsl.exe -d Ubuntu -- bash -lc "cd '$wslDir' && USE_MODEL='$useModel' USE_BROWSER_TOOL='$browserFlag' USE_TAILSCALE='$tailscaleFlag' ./start-hermes-wsl.sh"
     Write-Host "[OK] Hermes gateway lanzado en pestana WSL" -ForegroundColor Green
 
     # Chat tab: opens hermes TUI after llama-server is ready
@@ -258,29 +266,33 @@ if ($useWTTabs) {
 Write-Host ""
 
 # 3. Arrancar servidor Whisper
-Write-Host "[2/5] Iniciando servidor Whisper local..." -ForegroundColor Yellow
-$whisperScript = Find-Script "whisper-server.py"
-$whisperProcess = $null
+if ($useWhisper) {
+    Write-Host "[2/6] Iniciando servidor Whisper local..." -ForegroundColor Yellow
+    $whisperScript = Find-Script "whisper-server.py"
+    $whisperProcess = $null
 
-if ($whisperScript) {
-    $whisperRunning = $false
-    try { $null = Invoke-RestMethod -Uri "http://localhost:8787/health" -Method Get -TimeoutSec 2 -ErrorAction Stop; $whisperRunning = $true } catch {}
+    if ($whisperScript) {
+        $whisperRunning = $false
+        try { $null = Invoke-RestMethod -Uri "http://localhost:8787/health" -Method Get -TimeoutSec 2 -ErrorAction Stop; $whisperRunning = $true } catch {}
 
-    if ($whisperRunning) {
-        Write-Host "[OK] Servidor Whisper ya esta corriendo" -ForegroundColor Green
+        if ($whisperRunning) {
+            Write-Host "[OK] Servidor Whisper ya esta corriendo" -ForegroundColor Green
+        }
+        else {
+            $whisperProcess = Start-Process py -ArgumentList "-3.12", $whisperScript, "--model", "medium" -WindowStyle Hidden -PassThru
+            Write-Host "[OK] Servidor Whisper lanzado (PID: $($whisperProcess.Id))" -ForegroundColor Green
+        }
     }
     else {
-        $whisperProcess = Start-Process py -ArgumentList "-3.12", $whisperScript, "--model", "medium" -WindowStyle Hidden -PassThru
-        Write-Host "[OK] Servidor Whisper lanzado (PID: $($whisperProcess.Id))" -ForegroundColor Green
+        Write-Host "[!] whisper-server.py no encontrado" -ForegroundColor Yellow
     }
-}
-else {
-    Write-Host "[!] whisper-server.py no encontrado" -ForegroundColor Yellow
+} else {
+    Write-Host "[2/6] Servidor Whisper desactivado (useWhisper=false)" -ForegroundColor DarkGray
 }
 Write-Host ""
 
 # 4. Arrancar broker local para ComfyUI
-Write-Host "[3/5] Iniciando broker local de ComfyUI..." -ForegroundColor Yellow
+Write-Host "[3/6] Iniciando broker local de ComfyUI..." -ForegroundColor Yellow
 $brokerScript = Find-Script "comfyui-broker.py"
 $brokerWindowScript = Find-Script "start-comfyui-broker-window.ps1"
 $brokerPython = "C:\ComfyUI\.venv\Scripts\python.exe"
@@ -385,56 +397,111 @@ else {
 Write-Host ""
 
 # 5. Arrancar Wyoming STT bridge
-Write-Host "[4/5] Iniciando Wyoming STT Bridge (puerto 10300)..." -ForegroundColor Yellow
-$wyomingSttScript = Find-Script "wyoming-whisper-bridge.py"
-if ($wyomingSttScript) {
-    $sttRunning = $false
-    try {
-        $sock = New-Object System.Net.Sockets.TcpClient
-        $sock.Connect("127.0.0.1", 10300)
-        $sock.Close()
-        $sttRunning = $true
-    } catch {}
-    if ($sttRunning) {
-        Write-Host "[OK] Wyoming STT Bridge ya esta corriendo" -ForegroundColor Green
+if ($useWhisper) {
+    Write-Host "[4/6] Iniciando Wyoming STT Bridge (puerto 10300)..." -ForegroundColor Yellow
+    $wyomingSttScript = Find-Script "wyoming-whisper-bridge.py"
+    if ($wyomingSttScript) {
+        $sttRunning = $false
+        try {
+            $sock = New-Object System.Net.Sockets.TcpClient
+            $sock.Connect("127.0.0.1", 10300)
+            $sock.Close()
+            $sttRunning = $true
+        } catch {}
+        if ($sttRunning) {
+            Write-Host "[OK] Wyoming STT Bridge ya esta corriendo" -ForegroundColor Green
+        } else {
+            $sttDir = Split-Path $wyomingSttScript
+            $sttDriveLetter = $sttDir.Substring(0,1).ToLower()
+            $wslSttDir = "/mnt/$sttDriveLetter" + ($sttDir.Substring(2) -replace '\\','/')
+            $sttProc = Start-Process wsl.exe -ArgumentList "-d", "Ubuntu", "--", "python3", "$wslSttDir/wyoming-whisper-bridge.py", "--whisper-url", "http://host.docker.internal:8787", "--port", "10300" -WindowStyle Hidden -PassThru
+            $wyomingSttPid = $sttProc.Id
+            Write-Host "[OK] Wyoming STT Bridge lanzado (PID: $wyomingSttPid, puerto 10300)" -ForegroundColor Green
+        }
     } else {
-        $sttDir = Split-Path $wyomingSttScript
-        $sttDriveLetter = $sttDir.Substring(0,1).ToLower()
-        $wslSttDir = "/mnt/$sttDriveLetter" + ($sttDir.Substring(2) -replace '\\','/')
-        $sttProc = Start-Process wsl.exe -ArgumentList "-d", "Ubuntu", "--", "python3", "$wslSttDir/wyoming-whisper-bridge.py", "--whisper-url", "http://host.docker.internal:8787", "--port", "10300" -WindowStyle Hidden -PassThru
-        $wyomingSttPid = $sttProc.Id
-        Write-Host "[OK] Wyoming STT Bridge lanzado (PID: $wyomingSttPid, puerto 10300)" -ForegroundColor Green
+        Write-Host "[!] wyoming-whisper-bridge.py no encontrado" -ForegroundColor Yellow
     }
 } else {
-    Write-Host "[!] wyoming-whisper-bridge.py no encontrado" -ForegroundColor Yellow
+    Write-Host "[4/6] Wyoming STT Bridge desactivado (useWhisper=false)" -ForegroundColor DarkGray
 }
 Write-Host ""
 
 # 6. Arrancar Wyoming TTS bridge
-Write-Host "[5/5] Iniciando Wyoming TTS Bridge (puerto 10200)..." -ForegroundColor Yellow
-$wyomingTtsScript = Find-Script "wyoming-edge-tts-bridge.py"
-if ($wyomingTtsScript) {
-    $ttsRunning = $false
-    try {
-        $sock = New-Object System.Net.Sockets.TcpClient
-        $sock.Connect("127.0.0.1", 10200)
-        $sock.Close()
-        $ttsRunning = $true
-    } catch {}
-    if ($ttsRunning) {
-        Write-Host "[OK] Wyoming TTS Bridge ya esta corriendo" -ForegroundColor Green
+if ($useWhisper) {
+    Write-Host "[5/6] Iniciando Wyoming TTS Bridge (puerto 10200)..." -ForegroundColor Yellow
+    $wyomingTtsScript = Find-Script "wyoming-edge-tts-bridge.py"
+    if ($wyomingTtsScript) {
+        $ttsRunning = $false
+        try {
+            $sock = New-Object System.Net.Sockets.TcpClient
+            $sock.Connect("127.0.0.1", 10200)
+            $sock.Close()
+            $ttsRunning = $true
+        } catch {}
+        if ($ttsRunning) {
+            Write-Host "[OK] Wyoming TTS Bridge ya esta corriendo" -ForegroundColor Green
+        } else {
+            $ttsDir = Split-Path $wyomingTtsScript
+            $ttsDriveLetter = $ttsDir.Substring(0,1).ToLower()
+            $wslTtsDir = "/mnt/$ttsDriveLetter" + ($ttsDir.Substring(2) -replace '\\','/')
+            $ttsProc = Start-Process wsl.exe -ArgumentList "-d", "Ubuntu", "--", "python3", "$wslTtsDir/wyoming-edge-tts-bridge.py", "--port", "10200" -WindowStyle Hidden -PassThru
+            $wyomingTtsPid = $ttsProc.Id
+            Write-Host "[OK] Wyoming TTS Bridge lanzado (PID: $wyomingTtsPid, puerto 10200)" -ForegroundColor Green
+        }
     } else {
-        $ttsDir = Split-Path $wyomingTtsScript
-        $ttsDriveLetter = $ttsDir.Substring(0,1).ToLower()
-        $wslTtsDir = "/mnt/$ttsDriveLetter" + ($ttsDir.Substring(2) -replace '\\','/')
-        $ttsProc = Start-Process wsl.exe -ArgumentList "-d", "Ubuntu", "--", "python3", "$wslTtsDir/wyoming-edge-tts-bridge.py", "--port", "10200" -WindowStyle Hidden -PassThru
-        $wyomingTtsPid = $ttsProc.Id
-        Write-Host "[OK] Wyoming TTS Bridge lanzado (PID: $wyomingTtsPid, puerto 10200)" -ForegroundColor Green
+        Write-Host "[!] wyoming-edge-tts-bridge.py no encontrado" -ForegroundColor Yellow
     }
 } else {
-    Write-Host "[!] wyoming-edge-tts-bridge.py no encontrado" -ForegroundColor Yellow
+    Write-Host "[5/6] Wyoming TTS Bridge desactivado (useWhisper=false)" -ForegroundColor DarkGray
 }
 Write-Host ""
+
+# 7. Arrancar Open WebUI
+$openWebuiProcess = $null
+if ($useOpenWebUI) {
+    Write-Host "[6/6] Iniciando Open WebUI (puerto 8080)..." -ForegroundColor Yellow
+    $openWebuiExe = "E:\Workspace\open-webui\.venv\Scripts\open-webui.exe"
+    $openWebuiPort = 8080
+
+    if (-not (Test-Path $openWebuiExe)) {
+        Write-Host "[!] No se encuentra open-webui.exe en $openWebuiExe" -ForegroundColor Red
+    } else {
+        $owuiRunning = $false
+        try { $null = Invoke-RestMethod -Uri "http://localhost:${openWebuiPort}/health" -Method Get -TimeoutSec 2 -ErrorAction Stop; $owuiRunning = $true } catch {}
+
+        if ($owuiRunning) {
+            Write-Host "[OK] Open WebUI ya esta corriendo en puerto $openWebuiPort" -ForegroundColor Green
+        } else {
+            $owuiEnv = @{
+                DATA_DIR                       = "E:\Workspace\open-webui\data"
+                OPENAI_API_BASE_URL            = "http://localhost:8642/v1"
+                OPENAI_API_KEY                 = "hermes-owui-a7f3c9e2b1d4"
+                WEBUI_AUTH                     = "true"
+                PORT                           = "$openWebuiPort"
+                HF_HUB_OFFLINE                 = "1"
+                HF_HUB_DISABLE_SYMLINKS_WARNING = "1"
+                AUDIO_STT_ENGINE               = "openai"
+                AUDIO_STT_OPENAI_API_BASE_URL  = "http://localhost:8787/v1"
+                AUDIO_STT_OPENAI_API_KEY       = "not-needed"
+                AUDIO_STT_MODEL                = "whisper-1"
+            }
+            if ($useWTTabs) {
+                $owuiLaunchScript = Join-Path $openclawRoot "owui-launch.cmd"
+                $owuiLines = @("@echo off")
+                foreach ($kv in $owuiEnv.GetEnumerator()) { $owuiLines += "set $($kv.Key)=$($kv.Value)" }
+                $owuiLines += "`"$openWebuiExe`" serve"
+                $owuiLines | Set-Content $owuiLaunchScript -Encoding ASCII
+                wt.exe -w 0 new-tab --title "Open WebUI :$openWebuiPort" -- cmd /c "`"$owuiLaunchScript`""
+            } else {
+                foreach ($kv in $owuiEnv.GetEnumerator()) { [Environment]::SetEnvironmentVariable($kv.Key, $kv.Value, "Process") }
+                $openWebuiProcess = Start-Process $openWebuiExe -ArgumentList "serve" -WindowStyle Minimized -PassThru
+            }
+            Write-Host "[OK] Open WebUI lanzado (puerto $openWebuiPort)" -ForegroundColor Green
+            Write-Host "  URL: http://localhost:$openWebuiPort" -ForegroundColor Gray
+        }
+    }
+    Write-Host ""
+}
 
 # Warm-up
 if ($llamaNeedsWarmup) {
@@ -467,6 +534,7 @@ Write-Host ""
 Write-Host "========================================" -ForegroundColor Magenta
 Write-Host "  Todos los servicios lanzados" -ForegroundColor Green
 Write-Host "  Hermes gateway corriendo en pestana WSL" -ForegroundColor Gray
+if ($useOpenWebUI) { Write-Host "  Open WebUI: http://localhost:8080" -ForegroundColor Gray }
 Write-Host "  Presiona Ctrl+C para detener todo" -ForegroundColor Gray
 Write-Host "========================================" -ForegroundColor Magenta
 Write-Host ""
@@ -499,6 +567,11 @@ finally {
         try { Stop-Process -Id $wyomingTtsPid -Force -ErrorAction SilentlyContinue } catch {}
         wsl.exe -d Ubuntu -- pkill -f "wyoming-edge-tts-bridge.py" 2>$null
         Write-Host "[OK] Wyoming TTS Bridge detenido." -ForegroundColor Green
+    }
+    if ($openWebuiProcess -and -not $openWebuiProcess.HasExited) {
+        Write-Host "[cleanup] Deteniendo Open WebUI (PID: $($openWebuiProcess.Id))..." -ForegroundColor Yellow
+        Stop-Process -Id $openWebuiProcess.Id -Force -ErrorAction SilentlyContinue
+        Write-Host "[OK] Open WebUI detenido." -ForegroundColor Green
     }
     Write-Host "[OK] Todo limpio. Hasta luego!" -ForegroundColor Cyan
     Start-Sleep -Seconds 2
