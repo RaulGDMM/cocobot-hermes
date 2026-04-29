@@ -66,7 +66,7 @@ cleanup() {
   pkill -f "hermes gateway" 2>/dev/null || true
   echo "[OK] Hermes gateway detenido"
   if (( TAILSCALE_STARTED )); then
-    echo "[cleanup] Deteniendo Tailscale serve (Open WebUI)..."
+    echo "[cleanup] Deteniendo Tailscale serve (Hermes WebUI)..."
     tailscale serve --https=8443 off 2>/dev/null || true
     echo "[OK] Tailscale serve detenido"
   fi
@@ -101,7 +101,7 @@ sleep 0.5
 
 # ---- Tailscale: expose Open WebUI via secure mesh ----
 start_tailscale() {
-  echo "[tailscale] Iniciando Tailscale (acceso remoto a Open WebUI)..."
+  echo "[tailscale] Iniciando Tailscale (acceso remoto a Hermes WebUI)..."
 
   # Check if tailscaled is already running
   if tailscale status >/dev/null 2>&1; then
@@ -136,14 +136,14 @@ start_tailscale() {
     echo "[OK] Tailscale conectado (IP: ${ts_ip})"
   fi
 
-  # Expose Open WebUI (HTTPS, only within tailnet — not public Funnel)
-  tailscale serve --bg --https=8443 http://host.docker.internal:8080 2>&1 | sed 's/^/  /'
+  # Expose Hermes WebUI (HTTPS, only within tailnet — not public Funnel)
+  tailscale serve --bg --https=8443 http://127.0.0.1:8787 2>&1 | sed 's/^/  /'
   TAILSCALE_STARTED=1
 
   # Keep existing Funnel for Home Assistant
   tailscale funnel --bg 8123 >/dev/null 2>&1 || true
 
-  echo "[OK] Open WebUI accesible en: https://desktop-gds672i.tail3b193a.ts.net:8443/"
+  echo "[OK] Hermes WebUI accesible en: https://desktop-gds672i.tail3b193a.ts.net:8443/"
   echo ""
 }
 
@@ -155,6 +155,11 @@ else
 fi
 
 # Start the Hermes gateway (foreground — manages Telegram, WhatsApp, cron, etc.)
+# -vv = DEBUG verbosity: muestra tools llamadas, reasoning, contexto, errores detallados
+# -v = INFO verbosity: solo eventos principales
+# Sin flag = modo display box (poco informativo)
+GATEWAY_VERBOSE="${GATEWAY_VERBOSE:-vv}"  # vv=DEBUG, v=INFO, vacío=silencioso
+
 # Restart loop mimics systemd Restart=on-failure:
 #   - exit 0   → clean shutdown, don't restart
 #   - exit 75  → explicit restart request (hermes gateway restart)
@@ -171,7 +176,11 @@ while true; do
 
   # Capture exit code without triggering set -e
   exit_code=0
-  "${HERMES_BIN}" gateway || exit_code=$?
+  if [[ -n "${GATEWAY_VERBOSE}" ]]; then
+    "${HERMES_BIN}" gateway run -${GATEWAY_VERBOSE} || exit_code=$?
+  else
+    "${HERMES_BIN}" gateway || exit_code=$?
+  fi
 
   # Clean exit → stop
   if [[ ${exit_code} -eq 0 ]]; then

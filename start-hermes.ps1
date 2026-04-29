@@ -12,6 +12,9 @@ $useBrowserTool = $true
 # Open WebUI: $true para arrancar la interfaz web en puerto 8080
 $useOpenWebUI = $false
 
+# Hermes WebUI: $true para arrancar hermes-webui en puerto 8787 (WSL)
+$useHermesWebUI = $true
+
 # Whisper + Wyoming bridges (Home Assistant): $true para arrancar whisper-server y bridges STT/TTS
 # Discord y Telegram usan el STT interno de Hermes, no necesitan esto.
 $useWhisper = $false
@@ -34,6 +37,7 @@ Write-Host "  Modelo: $useModel" -ForegroundColor Gray
 Write-Host "  llama.cpp: $useLlamaInstall" -ForegroundColor Gray
 Write-Host "  Browser tool: $useBrowserTool" -ForegroundColor Gray
 Write-Host "  Open WebUI: $useOpenWebUI" -ForegroundColor Gray
+Write-Host "  Hermes WebUI: $useHermesWebUI" -ForegroundColor Gray
 Write-Host ""
 
 # Paths: scripts in local scripts/ folder, binaries & models in Openclaw/
@@ -181,7 +185,7 @@ else {
             "--mmproj",              $mmProjFile,
             "--ctx-size",            $ctxSize,
             "--slot-save-path",      $slotCachePath,
-            "--parallel",            "2",
+            "--parallel",            "1",
             "--n-gpu-layers",        "99",
             "--flash-attn",          "on",
             "--batch-size",          "2048",
@@ -207,7 +211,7 @@ else {
             $chatTemplateKwargs = '{"enable_thinking":true,"preserve_thinking":true}'
             $env:LLAMA_CHAT_TEMPLATE_KWARGS = $chatTemplateKwargs
             $llamaArgs += @("--no-prefill-assistant")
-            $llamaArgs += @("--kv-unified", "--ctx-checkpoints", "32")
+            $llamaArgs += @("--kv-unified", "--ctx-checkpoints", "32", "--cache-ram", "16384", "--no-context-shift", "--no-cache-idle-slots")
             if ($useModel -eq "qwen36_27b") {
                 $llamaArgs += @("-ctk", "q8_0", "-ctv", "q8_0")
             }
@@ -252,7 +256,7 @@ if ($useWTTabs) {
     $wslDir = "/mnt/$driveLetter" + ($PSScriptRoot.Substring(2) -replace '\\','/')
     Write-Host "  Lanzando Hermes gateway en pestana WSL..." -ForegroundColor DarkCyan
     $browserFlag = if ($useBrowserTool) { 'on' } else { 'off' }
-    $tailscaleFlag = if ($useOpenWebUI) { 'on' } else { 'off' }
+    $tailscaleFlag = if ($useOpenWebUI -or $useHermesWebUI) { 'on' } else { 'off' }
     wt.exe -w 0 new-tab --title "Hermes Gateway (WSL)" -- wsl.exe -d Ubuntu -- bash -lc "cd '$wslDir' && USE_MODEL='$useModel' USE_BROWSER_TOOL='$browserFlag' USE_TAILSCALE='$tailscaleFlag' ./start-hermes-wsl.sh"
     Write-Host "[OK] Hermes gateway lanzado en pestana WSL" -ForegroundColor Green
 
@@ -456,7 +460,59 @@ if ($useWhisper) {
 }
 Write-Host ""
 
-# 7. Arrancar Open WebUI
+# 7. Arrancar Hermes WebUI (WSL, puerto 8787)
+if ($useHermesWebUI) {
+    Write-Host "Iniciando Hermes WebUI (puerto 8787)..." -ForegroundColor Yellow
+    $hermesWebUIPort = 8787
+    $hwuiRunning = $false
+    try { $null = Invoke-RestMethod -Uri "http://localhost:${hermesWebUIPort}/health" -Method Get -TimeoutSec 2 -ErrorAction Stop; $hwuiRunning = $true } catch {}
+
+    if ($hwuiRunning) {
+        Write-Host "[OK] Hermes WebUI ya esta corriendo en puerto $hermesWebUIPort" -ForegroundColor Green
+    } elseif ($useWTTabs) {
+        # Auto-patch: fix TERMINAL_CWD duplicate kwarg bug (hermes-webui v0.50.238+)
+        $patchCheck = wsl.exe -d Ubuntu -- grep -c 'pop.*TERMINAL_CWD' /root/hermes-webui/api/streaming.py 2>$null
+        if ($patchCheck -eq "0" -or -not $patchCheck) {
+            wsl.exe -d Ubuntu -- sed -i '/_set_thread_env(\*\*_profile_runtime_env/i\        _profile_runtime_env.pop("TERMINAL_CWD", None)' /root/hermes-webui/api/streaming.py
+            Write-Host "[PATCH] Aplicado fix TERMINAL_CWD en streaming.py" -ForegroundColor Cyan
+        }
+        $hwuiCmd = "cd /root/.hermes/hermes-agent && HERMES_WEBUI_HOST=0.0.0.0 exec venv/bin/python /root/hermes-webui/server.py"
+        wt.exe -w 0 new-tab --title "Hermes WebUI :$hermesWebUIPort" -- wsl.exe -d Ubuntu -- bash -lc $hwuiCmd
+        Write-Host "[OK] Hermes WebUI lanzado en pestana WSL (puerto $hermesWebUIPort)" -ForegroundColor Green
+        Write-Host "  URL: http://localhost:$hermesWebUIPort" -ForegroundColor Gray
+    } else {
+        Write-Host "[!] Hermes WebUI requiere Windows Terminal para pestanas WSL" -ForegroundColor Yellow
+    }
+
+    # Port proxy para acceso LAN (la IP de WSL2 cambia en cada reinicio)
+    $wslIp = (wsl.exe -d Ubuntu -- hostname -I).Trim().Split()[0]
+    if ($wslIp) {
+        Write-Host "  Configurando port proxy LAN (WSL2 IP: $wslIp)..." -ForegroundColor DarkCyan
+        $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+        $netshSetup = @"
+netsh interface portproxy delete v4tov4 listenport=$hermesWebUIPort listenaddress=0.0.0.0 2>`$null
+netsh interface portproxy add v4tov4 listenport=$hermesWebUIPort listenaddress=0.0.0.0 connectport=$hermesWebUIPort connectaddress=$wslIp
+`$fw = netsh advfirewall firewall show rule name="Hermes WebUI LAN" 2>`$null
+if (`$fw -notmatch 'Hermes WebUI LAN') { netsh advfirewall firewall add rule name="Hermes WebUI LAN" dir=in action=allow protocol=tcp localport=$hermesWebUIPort }
+"@
+        if ($isAdmin) {
+            Invoke-Expression $netshSetup
+        } else {
+            $tmpScript = Join-Path ([System.IO.Path]::GetTempPath()) "hermes-portproxy-setup.ps1"
+            $netshSetup | Set-Content $tmpScript -Encoding UTF8
+            Start-Process powershell -Verb RunAs -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$tmpScript`"" -WindowStyle Hidden -Wait
+            try { Remove-Item $tmpScript -Force } catch {}
+        }
+        Write-Host "  [OK] Port proxy LAN activo ($hermesWebUIPort -> ${wslIp}:$hermesWebUIPort)" -ForegroundColor Green
+    } else {
+        Write-Host "  [!] No se pudo obtener la IP de WSL2, acceso LAN no disponible" -ForegroundColor Yellow
+    }
+} else {
+    Write-Host "Hermes WebUI desactivado (useHermesWebUI=false)" -ForegroundColor DarkGray
+}
+Write-Host ""
+
+# 8. Arrancar Open WebUI
 $openWebuiProcess = $null
 if ($useOpenWebUI) {
     Write-Host "[6/6] Iniciando Open WebUI (puerto 8080)..." -ForegroundColor Yellow
@@ -534,6 +590,7 @@ Write-Host ""
 Write-Host "========================================" -ForegroundColor Magenta
 Write-Host "  Todos los servicios lanzados" -ForegroundColor Green
 Write-Host "  Hermes gateway corriendo en pestana WSL" -ForegroundColor Gray
+if ($useHermesWebUI) { Write-Host "  Hermes WebUI: http://localhost:8787" -ForegroundColor Gray }
 if ($useOpenWebUI) { Write-Host "  Open WebUI: http://localhost:8080" -ForegroundColor Gray }
 Write-Host "  Presiona Ctrl+C para detener todo" -ForegroundColor Gray
 Write-Host "========================================" -ForegroundColor Magenta
@@ -573,6 +630,14 @@ finally {
         Stop-Process -Id $openWebuiProcess.Id -Force -ErrorAction SilentlyContinue
         Write-Host "[OK] Open WebUI detenido." -ForegroundColor Green
     }
+    # Limpiar port proxy LAN
+    $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    if ($isAdmin) {
+        $null = netsh interface portproxy delete v4tov4 listenport=8787 listenaddress=0.0.0.0 2>$null
+    } else {
+        Start-Process powershell -Verb RunAs -ArgumentList "-NoProfile -Command `"netsh interface portproxy delete v4tov4 listenport=8787 listenaddress=0.0.0.0`"" -WindowStyle Hidden -Wait
+    }
+    Write-Host "[cleanup] Port proxy LAN eliminado." -ForegroundColor Gray
     Write-Host "[OK] Todo limpio. Hasta luego!" -ForegroundColor Cyan
     Start-Sleep -Seconds 2
     [Environment]::Exit(0)
