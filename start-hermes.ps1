@@ -250,6 +250,68 @@ else {
 }
 Write-Host ""
 
+# Auto-patch: fix preflight token estimation for images (base64 over-count bug)
+$patchFile = "/root/.hermes/hermes-agent/agent/model_metadata.py"
+$patchCheck = wsl.exe -d Ubuntu -- grep -c '_estimate_messages_chars' $patchFile 2>$null
+if ($patchCheck -eq "0" -or -not $patchCheck) {
+    $patchScript = @'
+import sys
+filepath = "/root/.hermes/hermes-agent/agent/model_metadata.py"
+with open(filepath, "r") as f:
+    content = f.read()
+old = "    if messages:\n        total_chars += sum(len(str(msg)) for msg in messages)"
+new = """    if messages:
+        total_chars += _estimate_messages_chars(messages)"""
+if old in content:
+    # Also inject the helper function after the closing of estimate_request_tokens_rough
+    helper = '''
+
+def _estimate_messages_chars(messages):
+    """Estimate char count for messages, treating images as ~6400 chars (~1600 tokens).
+
+    Avoids counting raw base64 image data which massively over-estimates token usage.
+    """
+    _IMAGE_CHARS = 6400
+    total = 0
+    for msg in messages:
+        content = msg.get("content", "")
+        if isinstance(content, str):
+            total += len(content)
+        elif isinstance(content, list):
+            for part in content:
+                if isinstance(part, str):
+                    total += len(part)
+                elif isinstance(part, dict):
+                    ptype = part.get("type", "")
+                    if ptype in ("image_url", "input_image", "image"):
+                        total += _IMAGE_CHARS
+                    elif "text" in part:
+                        total += len(part["text"])
+                    else:
+                        total += len(str(part))
+        else:
+            total += len(str(content))
+        total += 20
+    return total'''
+    content = content.replace(old, new)
+    # Insert helper after the function
+    marker = "    return (total_chars + 3) // 4"
+    idx = content.find(marker, content.find("estimate_request_tokens_rough"))
+    if idx > 0:
+        end = idx + len(marker)
+        content = content[:end] + helper + content[end:]
+    with open(filepath, "w") as f:
+        f.write(content)
+    print("OK")
+else:
+    print("SKIP")
+'@
+    $result = $patchScript | wsl.exe -d Ubuntu -- python3
+    if ($result -eq "OK") {
+        Write-Host "[PATCH] Fix preflight image token estimation aplicado" -ForegroundColor Cyan
+    }
+}
+
 # Gateway WSL: launch Hermes gateway in a WSL tab
 if ($useWTTabs) {
     $driveLetter = $PSScriptRoot.Substring(0,1).ToLower()
@@ -470,12 +532,6 @@ if ($useHermesWebUI) {
     if ($hwuiRunning) {
         Write-Host "[OK] Hermes WebUI ya esta corriendo en puerto $hermesWebUIPort" -ForegroundColor Green
     } elseif ($useWTTabs) {
-        # Auto-patch: fix TERMINAL_CWD duplicate kwarg bug (hermes-webui v0.50.238+)
-        $patchCheck = wsl.exe -d Ubuntu -- grep -c 'pop.*TERMINAL_CWD' /root/hermes-webui/api/streaming.py 2>$null
-        if ($patchCheck -eq "0" -or -not $patchCheck) {
-            wsl.exe -d Ubuntu -- sed -i '/_set_thread_env(\*\*_profile_runtime_env/i\        _profile_runtime_env.pop("TERMINAL_CWD", None)' /root/hermes-webui/api/streaming.py
-            Write-Host "[PATCH] Aplicado fix TERMINAL_CWD en streaming.py" -ForegroundColor Cyan
-        }
         $hwuiCmd = "cd /root/.hermes/hermes-agent && HERMES_WEBUI_HOST=0.0.0.0 exec venv/bin/python /root/hermes-webui/server.py"
         wt.exe -w 0 new-tab --title "Hermes WebUI :$hermesWebUIPort" -- wsl.exe -d Ubuntu -- bash -lc $hwuiCmd
         Write-Host "[OK] Hermes WebUI lanzado en pestana WSL (puerto $hermesWebUIPort)" -ForegroundColor Green
