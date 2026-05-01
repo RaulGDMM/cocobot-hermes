@@ -13,7 +13,8 @@ USE_BROWSER_TOOL="${USE_BROWSER_TOOL:-on}"
 USE_TAILSCALE="${USE_TAILSCALE:-off}"
 
 LLAMA_PORT=30000
-LLAMA_HOST="host.docker.internal"
+# Resolve Windows host IP (WSL gateway) — replaces old host.docker.internal
+LLAMA_HOST="$(ip route show default | awk '{print $3}')"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CLEANUP_DONE=0
 HERMES_BIN=""
