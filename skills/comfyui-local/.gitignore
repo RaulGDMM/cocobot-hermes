@@ -1,0 +1,23 @@
+# Generated outputs
+output/
+*.mp4
+*.mp3
+*.wav
+!scripts/assets/cocobot-voice-ref.wav
+!scripts/assets/cocobot-voice-ref.txt
+
+# Python caches
+__pycache__/
+*.pyc
+*.pyo
+
+# Backups
+*.bak
+*.backup
+*.backup.*
+
+# Temporary files
+nul
+
+# Test images
+capitulo1/

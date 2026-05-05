@@ -32,10 +32,10 @@ Use `--model` to choose the image generation model. Default is `flux2-klein-9b`.
 
 | Model | Flag | Quality | Speed (RTX 5090) | VRAM | Text | Best for |
 |-------|------|---------|-------------------|------|------|----------|
-| FLUX.1 Dev | `--model flux1-dev` | High | ~8-12s | ~16GB | Good | General use, balanced |
-| FLUX.2 Klein 9B | `--model flux2-klein-9b` | Higher | ~3-5s | ~12GB | Excellent | Speed + quality, text rendering |
+| FLUX.1 Dev | `--model flux1-dev` | High | ~8-12s | ~16GB | Good | **Character consistency**, faithful to detailed character descriptions |
+| FLUX.2 Klein 9B | `--model flux2-klein-9b` | Higher | ~3-5s | ~12GB | Excellent | Speed + quality, text rendering, landscapes, fast iterations |
 
-FLUX.2 Klein 9B is a distillation of FLUX.2 Dev (32B) into a compact 9B model. It inherits FLUX.2's architecture: better prompt adherence, superior text rendering, improved anatomy, and higher native resolution (4MP vs 1MP). Despite being smaller than FLUX.1 Dev (12B), it outperforms it due to the FLUX.2 architecture.
+**For video series with recurring characters**: Use FLUX.1 Dev for scenes featuring the main character. It produces more consistent character rendering across multiple generations. FLUX.2 Klein is better for backgrounds, landscapes, and quick iterations.
 
 ## Before calling the script
 
@@ -212,6 +212,25 @@ Image + Audio (first frame + audio conditioning)
 uv run {baseDir}/scripts/generate_video.py --image "./scene.png" --audio "./narration.wav" --prompt "The narrator describes the scene" --filename "output.mp4"
 ```
 
+Lip-sync mode (best for talking heads / singing)
+
+```bash
+uv run {baseDir}/scripts/generate_video.py --lipsync --image "./portrait.png" --audio "./speech.wav" --prompt "A woman speaking directly to camera" --filename "lipsync_output.mp4"
+```
+
+- Requires both `--image` (face/portrait) and `--audio` (speech/singing audio).
+- Internally uses MelBand RoFormer to isolate vocals from the audio, then conditions video generation on the clean vocal track via a dedicated Audio VAE.
+- Produces significantly better lip synchronisation than regular `--image --audio` (which treats audio as ambient conditioning).
+- **The output video keeps the original audio track** — the script automatically replaces the model-generated audio with the input audio via ffmpeg after generation.
+- Best results with: clear frontal face, clean speech audio, 3-8 second clips.
+
+**CRITICAL for lipsync quality:**
+- Your prompt MUST include the exact spoken text in quotes for proper mouth movement:
+  `Speaking in Spanish with clear Spanish accent as [voice type] voice, saying: 'exact dialogue text here'`
+- Without this, lip sync is very poor — mouth moves but doesn't match the audio rhythm.
+- **ALWAYS analyze your source image with vision BEFORE crafting the prompt** to understand its composition (panels, character positions, decorative frames). Without this, camera movements can destroy structured compositions (tríptics, vignettes, ornate borders).
+- Use `STATIC CAMERA` in your prompt by default — zoom/pan distorts structured image layouts.
+
 Custom duration, resolution, and aspect ratio
 
 ```bash
@@ -251,21 +270,73 @@ Prompt tips for video
 - For image-to-video, describe what should **change** from the static image: "The water begins to flow", "Clouds drift across the sky"
 - Prompts are auto-enhanced by Gemma 3 12B for better results — keep your prompt natural and descriptive
 - **Speech/Lip-sync**: For characters speaking, specify language and accent: "speaking in Spanish with Spanish accent, saying: 'dialogue here'". Note: LTX generates mouth movements but audio will be ambient, not actual speech. For proper voice, generate TTS separately and combine with ffmpeg.
-- The negative prompt is built-in: blurry, watermark, subtitles, etc. Use `--negative-prompt "extra terms"` to **append** to the defaults, or prefix with `!` to fully override: `--negative-prompt "!only these terms"`.
+- The negative prompt is built-in: blurry, watermark, subtitles, etc. Use `--negative-prompt "extra terms"` to **append** to the defaults, or prefix with `bash: line 1: to: command not found--negative-prompt "!only these terms"`.
+
+### LTX 2.3 — Consistent Voice via ID-LoRA (for video series)
+
+For multi-clip video series where the same character speaks in every clip, use **ID-LoRA** to achieve consistent voice identity across all videos without relying on external TTS + post-processing.
+
+**What it does**: Uses a 5-second reference audio clip as "voice identity" → LTX 2.3 generates video with audio where the voice matches the reference for every clip, including proper lip-sync.
+
+**Models** (by AviadDahan, trained on LTX 2.3):
+- [CelebVHQ-3K](https://huggingface.co/AviadDahan/LTX-2.3-ID-LoRA-CelebVHQ-3K) — better generalization, scene variety, background sounds
+- [TalkVid-3K](https://huggingface.co/AviadDahan/LTX-2.3-ID-LoRA-TalkVid-3K) — more speaking styles/voices
+
+**How to use** (ComfyUI workflow by Kijai):
+- Download ID-LoRA model to ComfyUI models directory
+- Load the [I2V/T2V ID-LoRA workflow](https://huggingface.co/Kijai/LTX2.3_comfy/discussions/40)
+- Provide: reference image + 5s reference audio + text prompt with dialogue
+- The ID-LoRA node strength controls voice consistency — higher = more consistent
+- Uses MelBand RoFormer to extract clean vocal from reference audio automatically
+
+**Advantages over TTS + post-processing**:
+- Voice is natively generated by LTX (not pasted on afterward)
+- Lip-sync is native (not a separate step)
+- Ambient sound + dialogue are generated together coherently
+- No ffmpeg audio replacement needed
+- Voice stays consistent across clips even when scenes change
+
+**Limitations**:
+- ComfyUI must be up-to-date (ID-LoRA support added recently)
+- No native voice speed control yet (workaround: insert `....` for pauses)
+- Text-to-speech accuracy is improving but not perfect yet
+
+**For custom character voice**: Train your own ID-LoRA using [`ltx-trainer`](https://github.com/Lightricks/ltx-trainer) with clips of the target voice as reference dataset. See `references/ltx-2-3-lora-training.md` for details.
+
+### LTX 2.3 — Visual Character Consistency via Character LoRA
+
+For consistent character appearance across video clips, train a **Character LoRA** or **IC-LoRA** on LTX 2.3:
+
+- **Character LoRA**: Train on still frames of the character → consistent identity in generated videos
+- **IC-LoRA**: Structural control — keeps character pose/structure consistent across shots
+- **Training**: Use [`ltx-trainer`](https://github.com/Lightricks/ltx-trainer) or AI Toolkit (Ostris) ComfyUI workflow
+- **Dataset**: 10-20 still frames from different angles/poses (can be generated with FLUX.1 Dev which excels at character consistency)
+- See `references/ltx-2-3-lora-training.md` for full training guide
+
+**Recommended approach for character video series**:
+1. Generate reference images with FLUX.1 Dev (best character consistency)
+2. Train Character LoRA on those images for LTX 2.3 visual consistency
+3. Train ID-LoRA on character voice reference clips for audio consistency
+4. Use both LoRAs together in ComfyUI for fully consistent character video clips
 
 Notes (video)
 Notes (video)
 - Uses LTX 2.3 with a two-pass pipeline: first pass at half-resolution for structure, then latent upscale + refinement for detail.
 - Audio is generated automatically alongside the video (ambient sounds, effects). No separate audio step needed.
-- **⚠️ VOICE LIMITATION**: LTX 2.3 generates ambient/background audio that "accompanies" the scene — NOT literal voice dubbing or lip-sync speech. If a character speaks in the prompt, the model generates mouth movements but the audio will be atmospheric (room tone, ambient sounds), not actual spoken words. For proper voice sync, use TTS (Qwen3-TTS) separately and combine with ffmpeg afterward.
+- **Voice options**: LTX 2.3 has THREE approaches for character voice:
+  1. **Built-in voice** (default) — LTX generates ambient audio with mouth movements. Use `--lipsync` + quoted text for lip sync. Voice varies per clip.
+  2. **ID-LoRA voice** (consistent) — Uses a 5s reference audio clip to maintain consistent voice identity across clips. See section above. Best for video series.
+  3. **External TTS + ffmpeg** — Generate TTS with Qwen3-TTS separately, paste audio onto LTX video. Most control over exact dialogue text, but lip-sync requires the `--lipsync` flag and quoted text in prompt.
+- For **video series with recurring characters**: ID-LoRA is preferred for voice consistency; Character LoRA for visual consistency.
 - **`--audio`**: optionally provide a local audio file (wav/mp3/ogg/flac/m4a) as a conditioning reference. The model uses it to synchronize video motion to the rhythm, speech, or effects in the audio. The output audio is **regenerated by the model** (not the original file). If the user wants the exact original audio track on the video, replace it afterward with ffmpeg. Can be combined with `--image`.
 - Output format is MP4 (auto codec). Compatible with Telegram and most players.
 - For image-to-video, `--image` accepts a local path. The script uploads it to the broker automatically.
 - `--aspect` and `--resolution` are ignored in i2v mode if the image already defines dimensions (the image is resized to the closest preset).
 - Video generation is significantly slower than image generation. A 5s 720p video may take several minutes.
 - **CRITICAL**: Always use `exec timeout=1800` for video generation. The default exec timeout (300s) is NOT enough. Example: `exec timeout=1800 uv run {baseDir}/scripts/generate_video.py ...`
-- After generation, send the video with the `message` tool: `{ "action": "send", "message": "Aquí va el video", "media": "./output.mp4" }`.
+- After generation, send the video with the `message` tool: `{ "action": "send", "message": "Aquí va el video", "media": "./output.mp4" }.`.
 - One video per invocation. Do not batch video requests.
+- **Consistent voice across clips**: See `references/id-lora-voice.md` — ID-LoRA enables voice identity locking with a ~5s reference audio clip. Pre-trained checkpoints available (~1.1 GB each). Requires `--quantize` for <48GB VRAM setups.
 
 ---
 
@@ -469,3 +540,82 @@ uv run {baseDir}/scripts/generate_speech.py --text "Hi there" --speaker Mochi --
 - English, Spanish, Chinese, and other languages are all supported. Use `--language English` to force English if auto-detection fails.
 - If no `--ref-audio` and no `--speaker` and no `--design` are given, the script uses the default Cocobot voice (from `assets/cocobot-voice-ref.wav`).
 - Use `exec timeout=900` when calling from sandbox to match the broker timeout.
+
+### TTS — Post-Processing (REQUIRED)
+
+Qwen3-TTS tends to cut off the last syllable of generated speech. This is a known model behavior (see [Qwen3-TTS discussion #161](https://github.com/QwenLM/Qwen3-TTS/discussions/161)).
+
+**Fix: Add trailing silence with ffmpeg AFTER generation:**
+```bash
+ffmpeg -y -i "input.wav" -filter_complex "[0:a]apad=pad_dur=0.3[s]" -map "[s]" "output.wav"
+```
+This adds 0.3s of silence at the end, preventing abrupt cuts and giving the final phoneme room to complete. **Always apply this to every TTS clip before video generation.**
+
+### TTS + Video Pipeline (img2video with external audio)
+
+For video series where you need narration in a specific voice (e.g., Cocobot's voice via Qwen3-TTS), use a **two-step pipeline** instead of LTX's built-in voice:
+
+1. **Generate TTS** → `generate_speech_broker.py` (Qwen3-TTS with voice cloning)
+2. **Generate image** → `generate_image.py` (FLUX.2 Klein)
+3. **Generate video img2video** → `generate_video.py --image frame.png --audio narration.wav --prompt "scene description"`
+
+This gives you full control over the narration voice (cloned from reference) while LTX handles the visual animation synced to the audio rhythm. The output video will have LTX-generated ambient audio, so **replace it with your TTS audio via ffmpeg** after generation:
+
+```bash
+ffmpeg -i "video.mp4" -i "narration.wav" -map 0:v -map 1:a -c:v copy -c:a aac -b:a 192k -shortest "final.mp4"
+```
+
+### TTS — Pronunciation Fixes
+
+Qwen3-TTS sometimes garbles specific words (especially multi-syllable Spanish words like "transparentes" → "traspafartes"). If Whisper verification shows a word mispronounced:
+
+1. **First attempt**: Regenerate with the word split by hyphens to force syllable-by-syllable pronunciation:
+   - `"transparentes"` → `"trans-pa-ren-tes"`
+   - `"inteligencia"` → `"in-te-li-gen-cia"`
+   - This works because the TTS model treats each hyphenated segment as a separate phoneme group.
+
+2. **If still wrong**: Try phonetic spelling or simplify the word in context.
+
+3. **If neither works**: Accept the minor error — Whisper transcription doesn't always match what humans hear. The audio may sound fine even if Whisper transcribes it wrong. **Always verify by ear when possible.**
+
+**Apply this BEFORE regenerating the entire clip** — only fix the problematic word in the text.
+
+### TTS — Verifying Output (REQUIRED)
+
+After generating TTS clips, verify content with Whisper to ensure correct speech:
+
+```bash
+# Use faster-whisper (installed locally) to transcribe and check keyword coverage
+python3 -c "
+from faster_whisper import WhisperModel
+model = WhisperModel('medium', device='cpu', compute_type='int8')
+segs, info = model.transcribe('clip.wav', language='es', beam_size=1)
+text = ' '.join([s.text for s in segs]).strip()
+print(f'Language: {info.language} ({info.language_probability:.2f})')
+print(text)
+# Check keywords: sum(1 for kw in ['keyword1','keyword2'] if kw.lower() in text.lower())
+# Target: ≥80% keyword coverage
+"
+```
+
+- Use `faster-whisper` model `medium` with `int8` quantization (fast on CPU).
+- Check that detected language matches expected language (probability ≥0.9).
+- Verify ≥80% of key content words appear in transcription.
+- **If coverage <80%**: regenerate the clip. Common issues: wrong number pronunciation ("1.000" read as "mil mil" instead of "mil"), cut final syllables, or garbled proper nouns.
+- **Never summarize or truncate source text to fit 20s limit.** Instead, split the text into 2+ clips. User prefers complete content over clipped summaries.
+
+### TTS — Downloading from Broker
+
+Generated files live on the Windows host (WSL), NOT the sandbox. Download via broker base64 endpoint:
+
+```bash
+curl -s -X POST "$BROKER_URL/v1/gpu-exec" \
+  -H "Content-Type: application/json" \
+  -d '{"command":["base64","path/to/output.wav"],"timeout_seconds":30,"wsl":true}'
+```
+
+The response `stdout` contains the base64-encoded WAV. Decode and save locally.
+
+**Do NOT use SSH** to the broker — it times out and is unreliable for file transfer.
+
+**Script `scripts/broker_audio_download.py`** handles batch download + ffmpeg padding in one step. See `references/tts-workflow.md` for the full production pipeline.
