@@ -1,10 +1,13 @@
 # Hermes Agent Startup Script
 # ---- CONFIGURACION ----
-# Instalacion de llama.cpp: "stable" (actual) o "latest" (pruebas)
+# Instalacion de llama.cpp: "stable" (mainline), "latest" (pruebas), "ik_llama" (fork con KV Q6_0 y MTP), "beellama" (DFlash + TurboQuant)
+# ik_llama: KV Q6_0 (Hadamard rotations) para mas ctx, pero NO tiene --kv-unified asi que
+# cada slot queda limitado a ctx/parallel tokens (vs mainline donde un slot puede usar todo el ctx).
+# MTP tampoco funciona con multimodal. Volver a ik_llama cuando ambos problemas esten resueltos.
 $useLlamaInstall = "stable"
 
-# Modelo LLM: "qwen36_27b", "qwen36", "qwen36q4", "qwen35", "gemma4"
-$useModel = "qwen36_27b"
+# Modelo LLM: "qwen36_27b_bee_q5", "qwen36_27b_bee_q6", "qwen36_27b", "qwen36_27b_q6", "qwen36_27b_q4_mtp", "qwen36_27b_q5_mtp", "qwen36_27b_q6_mtp", "qwen36_27b_autoround_q6_mtp", "qwen36_27b_nvfp4", "qwen36_27b_nvfp4_1f", "qwen36", "qwen36q4", "qwen35", "gemma4"
+$useModel = "qwen36_27b_autoround_q6_mtp"
 
 # Herramienta browser: $true para activarla, $false para desactivarla
 $useBrowserTool = $true
@@ -14,6 +17,9 @@ $useOpenWebUI = $false
 
 # Hermes WebUI: $true para arrancar hermes-webui en puerto 8787 (WSL)
 $useHermesWebUI = $true
+
+# Hermes Desktop backend: hermes serve en WSL, consumido por la app nativa Windows
+$hermesDesktopPort = 9119
 
 # Whisper + Wyoming bridges (Home Assistant): $true para arrancar whisper-server y bridges STT/TTS
 # Discord y Telegram usan el STT interno de Hermes, no necesitan esto.
@@ -105,11 +111,16 @@ function Get-LlamaInstallInfo {
     switch ($InstallName) {
         "stable" { return @{ Name = "stable"; DirName = "llama-cpp"; Label = "estable" } }
         "latest" { return @{ Name = "latest"; DirName = "llama-cpp-latest"; Label = "pruebas" } }
-        default { throw "Valor invalido para `$useLlamaInstall`: '$InstallName'. Usa 'stable' o 'latest'." }
+        "ik_llama" { return @{ Name = "ik_llama"; DirName = "ik_llama-cpp"; Label = "ik_llama.cpp" } }
+        "beellama" { return @{ Name = "beellama"; DirName = "beellama\bin"; Label = "BeeLlama.cpp DFlash+TurboQuant" } }
+        default { throw "Valor invalido para `$useLlamaInstall`: '$InstallName'. Usa 'stable', 'latest', 'ik_llama' o 'beellama'." }
     }
 }
 
 $llamaInstall = Get-LlamaInstallInfo -InstallName $useLlamaInstall
+if ($useModel -in @("qwen36_27b_bee_q5","qwen36_27b_bee_q6") -and $useLlamaInstall -ne "beellama") {
+    throw "Los modelos BeeLlama Qwen3.6-27B requieren `$useLlamaInstall = 'beellama'."
+}
 
 Write-Host "[0] Tailscale: se arrancara en la pestana WSL del gateway" -ForegroundColor DarkCyan
 Write-Host ""
@@ -123,10 +134,52 @@ if ($useModel -eq "qwen36") {
     $modelLabel    = "Qwen3.6-35B-A3B-Q4_K_L"
     $modelSize     = "22 GB, vision+thinking, MoE 3B active"
     $ctxSize       = "200000"
+} elseif ($useModel -eq "qwen36_27b_bee_q5") {
+    $modelLabel    = "Qwen3.6-27B-Q5_K_S + DFlash Q4_K_M"
+    $modelSize     = "17.6 GB target + DFlash draft, vision+thinking, dense 27B, TurboQuant KV, ctx max"
+    $ctxSize       = "262144"
+} elseif ($useModel -eq "qwen36_27b_bee_q6") {
+    $modelLabel    = "Qwen3.6-27B-Q6_K + DFlash Q4_K_M"
+    $modelSize     = "21.0 GB target + DFlash draft, vision+thinking, dense 27B, TurboQuant KV, ctx 191k"
+    $ctxSize       = "191608"
 } elseif ($useModel -eq "qwen36_27b") {
     $modelLabel    = "Qwen3.6-27B-UD-Q4_K_XL"
     $modelSize     = "17.6 GB, vision+thinking, dense 27B, Unsloth Dynamic 2.0, KV Q8_0+rot"
     $ctxSize       = "200000"
+} elseif ($useModel -eq "qwen36_27b_q6") {
+    if ($useLlamaInstall -eq "ik_llama") {
+        $modelLabel    = "Qwen3.6-27B-Q6_K"
+        $modelSize     = "22.5 GB, vision+thinking, dense 27B, Q6_K, KV Q6_0+Hadamard (ik_llama unifies KV across 4 slots)"
+        $ctxSize       = "196608"
+    } else {
+        $modelLabel    = "Qwen3.6-27B-Q6_K"
+        $modelSize     = "22.5 GB, vision+thinking, dense 27B, Q6_K, KV Q8_0+rot"
+        $ctxSize       = "131072"
+    }
+} elseif ($useModel -eq "qwen36_27b_q4_mtp") {
+    $modelLabel    = "Qwen3.6-27B-UD-Q4_K_XL MTP"
+    $modelSize     = "17.9 GB + MTP/NextN heads, vision+thinking, dense 27B, Unsloth Dynamic 2.0, mainline llama.cpp MTP, KV Q8_0, ctx 150k"
+    $ctxSize       = "150000"
+} elseif ($useModel -eq "qwen36_27b_q5_mtp") {
+    $modelLabel    = "Qwen3.6-27B-UD-Q5_K_XL MTP"
+    $modelSize     = "20.4 GB + MTP/NextN heads, vision+thinking, dense 27B, mainline llama.cpp MTP, KV Q8_0, ctx 130k"
+    $ctxSize       = "130000"
+} elseif ($useModel -eq "qwen36_27b_q6_mtp") {
+    $modelLabel    = "Qwen3.6-27B-Q6_K MTP"
+    $modelSize     = "22.9 GB + MTP/NextN heads, vision+thinking, dense 27B, mainline llama.cpp MTP, KV K Q5_1 / V Q4_0 + draft KV F16, ctx 170k, encoder en GPU"
+    $ctxSize       = "170000"
+} elseif ($useModel -eq "qwen36_27b_autoround_q6_mtp") {
+    $modelLabel    = "Qwen3.6-27B-AutoRound-Q6_K MTP"
+    $modelSize     = "21 GB + MTP/NextN heads, vision+thinking, dense 27B, Intel AutoRound Q6_K (sphaela, virtually indistinguishable from F16), KV K Q8_0 / V Q5_1 + draft KV F16, ctx 160k, encoder en GPU"
+    $ctxSize       = "160000"
+} elseif ($useModel -eq "qwen36_27b_nvfp4") {
+    $modelLabel    = "Qwen3.6-27B-NVFP4-Q8_0 MTP"
+    $modelSize     = "18.7 GB trunk + 1.9 GB MTP draft Q4_K_M, vision+thinking, dense 27B, FFN NVFP4 + attn/SSM Q8_0, KV K Q5_1 / V Q4_0, ctx 175k"
+    $ctxSize       = "175000"
+} elseif ($useModel -eq "qwen36_27b_nvfp4_1f") {
+    $modelLabel    = "Qwen3.6-27B-NVFP4-MTP (one-file)"
+    $modelSize     = "15.5 GB single gguf con MTP/NextN embebido (sin draft externo), dense 27B, NVFP4 (michaelw9999, imatrix wikitrain), KV K Q8_0 / V Q5_1, ctx 230k"
+    $ctxSize       = "230000"
 } elseif ($useModel -eq "gemma4") {
     $modelLabel    = "Gemma 4 31B-it UD-Q4_K_XL"
     $modelSize     = "17.5 GB, vision+thinking"
@@ -136,6 +189,24 @@ if ($useModel -eq "qwen36") {
     $modelSize     = "17.6 GB, vision"
     $ctxSize       = "131072"
 }
+
+# Sampling params — single source of truth for both llama-server and broker restarts
+$env:OPENCLAW_LLAMA_TEMP = "0.6"
+$env:OPENCLAW_LLAMA_TOP_P = "0.95"
+$env:OPENCLAW_LLAMA_TOP_K = "20"
+$env:OPENCLAW_LLAMA_MIN_P = "0"
+$env:OPENCLAW_LLAMA_PREDICT = "81920"
+if ($useModel -in @("qwen36_27b_bee_q5","qwen36_27b_bee_q6","qwen36_27b","qwen36_27b_q6","qwen36_27b_q4_mtp","qwen36_27b_q5_mtp","qwen36_27b_q6_mtp","qwen36_27b_autoround_q6_mtp","qwen36_27b_nvfp4","qwen36_27b_nvfp4_1f")) {
+    $env:OPENCLAW_LLAMA_PRESENCE_PENALTY = "0"
+} else {
+    $env:OPENCLAW_LLAMA_PRESENCE_PENALTY = "1.5"
+}
+
+# MTP (Multi-Token Prediction) — upstream llama.cpp mainline uses --spec-type draft-mtp.
+# Requires a GGUF that includes MTP/NextN heads. Keep this isolated in qwen36_27b_*_mtp
+# so BeeLlama/DFlash remains one edit away if MTP is not stable enough for Hermes.
+$env:OPENCLAW_LLAMA_MTP_ENABLED = if ($useModel -in @("qwen36_27b_q4_mtp","qwen36_27b_q5_mtp","qwen36_27b_q6_mtp","qwen36_27b_autoround_q6_mtp","qwen36_27b_nvfp4","qwen36_27b_nvfp4_1f")) { "1" } else { "0" }
+$env:OPENCLAW_LLAMA_MTP_DRAFT_N_MAX = "3"
 
 Write-Host "[1/6] Comprobando llama-server ($modelLabel)..." -ForegroundColor Yellow
 
@@ -147,9 +218,46 @@ if ($useModel -eq "qwen36") {
 } elseif ($useModel -eq "qwen36q4") {
     $modelFile    = Join-Path $openclawRoot "models\qwen36-35b\Qwen3.6-35B-A3B-Q4_K_L.gguf"
     $mmProjFile   = Join-Path $openclawRoot "models\qwen36-35b\mmproj-BF16.gguf"
+} elseif ($useModel -eq "qwen36_27b_bee_q5") {
+    $modelFile    = Join-Path $openclawRoot "beellama\models\Qwen3.6-27B-Q5_K_S.gguf"
+    $mmProjFile   = Join-Path $openclawRoot "beellama\models\mmproj-BF16.gguf"
+    $draftModelFile = Join-Path $openclawRoot "beellama\models\dflash-draft-3.6-q4_k_m.gguf"
+} elseif ($useModel -eq "qwen36_27b_bee_q6") {
+    $modelFile    = Join-Path $openclawRoot "models\qwen36-27b\Qwen3.6-27B-Q6_K.gguf"
+    $mmProjFile   = Join-Path $openclawRoot "models\qwen36-27b\mmproj-BF16.gguf"
+    $draftModelFile = Join-Path $openclawRoot "beellama\models\dflash-draft-3.6-q4_k_m.gguf"
 } elseif ($useModel -eq "qwen36_27b") {
     $modelFile    = Join-Path $openclawRoot "models\qwen36-27b\Qwen3.6-27B-UD-Q4_K_XL.gguf"
     $mmProjFile   = Join-Path $openclawRoot "models\qwen36-27b\mmproj-BF16.gguf"
+} elseif ($useModel -eq "qwen36_27b_q6") {
+    # Use MTP gguf only when MTP esta activado; con MTP off el gguf MTP carga ~400 MiB extra inutiles.
+    if ($useLlamaInstall -eq "ik_llama" -and $env:OPENCLAW_LLAMA_MTP_ENABLED -eq "1") {
+        $modelFile = Join-Path $openclawRoot "models\qwen36-27b\Qwen3.6-27B-Q6_K-mtp.gguf"
+    } else {
+        $modelFile = Join-Path $openclawRoot "models\qwen36-27b\Qwen3.6-27B-Q6_K.gguf"
+    }
+    $mmProjFile   = Join-Path $openclawRoot "models\qwen36-27b\mmproj-BF16.gguf"
+} elseif ($useModel -eq "qwen36_27b_q4_mtp") {
+    # Same file as qwen36_27b profile: Unsloth's UD-Q4_K_XL gguf already includes MTP heads
+    $modelFile    = Join-Path $openclawRoot "models\qwen36-27b\Qwen3.6-27B-UD-Q4_K_XL.gguf"
+    $mmProjFile   = Join-Path $openclawRoot "models\qwen36-27b\mmproj-F16.gguf"
+} elseif ($useModel -eq "qwen36_27b_q5_mtp") {
+    $modelFile    = Join-Path $openclawRoot "models\qwen36-27b\Qwen3.6-27B-UD-Q5_K_XL.gguf"
+    $mmProjFile   = Join-Path $openclawRoot "models\qwen36-27b\mmproj-F16.gguf"
+} elseif ($useModel -eq "qwen36_27b_q6_mtp") {
+    $modelFile    = Join-Path $openclawRoot "models\qwen36-27b\Qwen3.6-27B-Q6_K-mtp.gguf"
+    $mmProjFile   = Join-Path $openclawRoot "models\qwen36-27b\mmproj-BF16.gguf"
+} elseif ($useModel -eq "qwen36_27b_autoround_q6_mtp") {
+    $modelFile    = Join-Path $openclawRoot "models\qwen36-27b\Qwen3.6-27B-AutoRound-Q6_K.gguf"
+    $mmProjFile   = Join-Path $openclawRoot "models\qwen36-27b\mmproj-BF16.gguf"
+} elseif ($useModel -eq "qwen36_27b_nvfp4") {
+    $modelFile    = Join-Path $openclawRoot "models\qwen36-27b\Qwen3.6-27B-NVFP4-Q8_0-mtp.gguf"
+    $mmProjFile   = Join-Path $openclawRoot "models\qwen36-27b\mmproj-Qwen3.6-27B-F16.gguf"
+    $draftModelFile = Join-Path $openclawRoot "models\qwen36-27b\mtp-Qwen3.6-27B-NVFP4-Q4_K_M.gguf"
+} elseif ($useModel -eq "qwen36_27b_nvfp4_1f") {
+    # gguf unico: las cabezas MTP/NextN van embebidas, no hay draft externo (--spec-type draft-mtp como los perfiles *_mtp)
+    $modelFile    = Join-Path $openclawRoot "models\qwen36-27b\Qwen3.6-27B-NVFP4-MTP-GGUF.gguf"
+    $mmProjFile   = Join-Path $openclawRoot "models\qwen36-27b\mmproj-Qwen3.6-27B-F16.gguf"
 } elseif ($useModel -eq "gemma4") {
     $modelFile    = Join-Path $openclawRoot "models\gemma4-31b\gemma-4-31B-it-UD-Q4_K_XL.gguf"
     $mmProjFile   = Join-Path $openclawRoot "models\gemma4-31b\mmproj-BF16.gguf"
@@ -164,6 +272,12 @@ if (-not (Test-Path $llamaServerExe)) {
 }
 elseif (-not (Test-Path $modelFile)) {
     Write-Host "[!] No se encuentra el modelo GGUF en $modelFile" -ForegroundColor Red
+}
+elseif ($useModel -in @("qwen36_27b_bee_q5","qwen36_27b_bee_q6") -and -not (Test-Path $draftModelFile)) {
+    Write-Host "[!] No se encuentra el draft DFlash GGUF en $draftModelFile" -ForegroundColor Red
+}
+elseif ($useModel -eq "qwen36_27b_nvfp4" -and $env:OPENCLAW_LLAMA_MTP_ENABLED -eq "1" -and -not (Test-Path $draftModelFile)) {
+    Write-Host "[!] No se encuentra el draft MTP GGUF en $draftModelFile" -ForegroundColor Red
 }
 else {
     $llamaRunning = $false
@@ -180,12 +294,13 @@ else {
         $llamaLogFile = Join-Path $openclawRoot "llama-server.log"
         $slotCachePath = Join-Path $openclawRoot "slot-cache"
         if (-not (Test-Path $slotCachePath)) { New-Item -ItemType Directory -Path $slotCachePath -Force | Out-Null }
+        $llamaLaunchEnv = @{}
         $llamaArgs = @(
             "--model",               $modelFile,
+            "--alias",               "qwen3.6-27b,$useModel",
             "--mmproj",              $mmProjFile,
             "--ctx-size",            $ctxSize,
             "--slot-save-path",      $slotCachePath,
-            "--parallel",            "1",
             "--n-gpu-layers",        "99",
             "--flash-attn",          "on",
             "--batch-size",          "2048",
@@ -195,25 +310,102 @@ else {
             "--log-file",            $llamaLogFile
         )
         # Model-specific flags
-        if ($useModel -in @("qwen36","qwen36q4","qwen36_27b")) {
-            $llamaArgs += @("--ubatch-size", "2048")
+        if ($useModel -in @("qwen36","qwen36q4","qwen36_27b_bee_q5","qwen36_27b_bee_q6","qwen36_27b","qwen36_27b_q6","qwen36_27b_q4_mtp","qwen36_27b_q5_mtp","qwen36_27b_q6_mtp","qwen36_27b_autoround_q6_mtp","qwen36_27b_nvfp4","qwen36_27b_nvfp4_1f")) {
+            $chatTemplateFile = Join-Path $openclawRoot "models\qwen36-27b\qwen3.6-enhanced.jinja"
+            $ubatchSize = if ($useModel -in @("qwen36_27b_q6_mtp","qwen36_27b_autoround_q6_mtp","qwen36_27b_nvfp4","qwen36_27b_nvfp4_1f")) { "1024" } else { "2048" }
+            $llamaArgs += @("--ubatch-size", $ubatchSize)
             $llamaArgs += @("--jinja")
-            $llamaArgs += @("--reasoning-format", "deepseek")
+            $llamaArgs += @("--chat-template-file", $chatTemplateFile)
+            $llamaArgs += @("--reasoning", "on")
+            $llamaArgs += @("--image-min-tokens", "1024")
             $llamaArgs += @("--image-max-tokens", "1024")
-            if ($useModel -eq "qwen36_27b") {
-                $llamaArgs += @("--presence-penalty", "0")
-            } else {
-                $llamaArgs += @("--presence-penalty", "1.5")
-            }
-            $llamaArgs += @("--min-p", "0")
-            $llamaArgs += @("--predict", "81920")
-            $llamaArgs += @("--reasoning-budget", "-1")
-            $chatTemplateKwargs = '{"enable_thinking":true,"preserve_thinking":true}'
+            $llamaArgs += @("--presence-penalty", $env:OPENCLAW_LLAMA_PRESENCE_PENALTY)
+            $llamaArgs += @("--min-p", $env:OPENCLAW_LLAMA_MIN_P)
+            $llamaArgs += @("--predict", $env:OPENCLAW_LLAMA_PREDICT)
+            $llamaArgs += @("--temp", $env:OPENCLAW_LLAMA_TEMP, "--top-p", $env:OPENCLAW_LLAMA_TOP_P, "--top-k", $env:OPENCLAW_LLAMA_TOP_K)
+            $chatTemplateKwargs = '{"preserve_thinking":true,"tool_call_format":"xml"}'
             $env:LLAMA_CHAT_TEMPLATE_KWARGS = $chatTemplateKwargs
+            $llamaLaunchEnv["LLAMA_CHAT_TEMPLATE_KWARGS"] = $chatTemplateKwargs
             $llamaArgs += @("--no-prefill-assistant")
-            $llamaArgs += @("--kv-unified", "--ctx-checkpoints", "32", "--cache-ram", "16384", "--no-context-shift", "--no-cache-idle-slots")
-            if ($useModel -eq "qwen36_27b") {
-                $llamaArgs += @("-ctk", "q8_0", "-ctv", "q8_0")
+            # MTP keeps draft state per slot, breaking ik_llama's KV unification.
+            # Force parallel=1 when MTP active on ik_llama to avoid KV exhaustion.
+            $useMtp = ($env:OPENCLAW_LLAMA_MTP_ENABLED -eq "1")
+            if ($useModel -in @("qwen36_27b_bee_q5","qwen36_27b_bee_q6")) {
+                $llamaArgs += @("--parallel", "1")
+            } elseif ($useModel -in @("qwen36_27b_nvfp4","qwen36_27b_nvfp4_1f")) {
+                $llamaArgs += @("--parallel", "1")
+            } elseif ($useMtp) {
+                $llamaArgs += @("--parallel", "1")
+            } else {
+                $llamaArgs += @("--parallel", "2")
+            }
+            if ($useLlamaInstall -eq "ik_llama") {
+                # ik_llama unifies KV across slots by default (n_ctx is total, not per-slot).
+                # Lacks --kv-unified / --no-cache-idle-slots; checkpoint flag is renamed.
+                $llamaArgs += @("--ctx-checkpoints", "32", "--ctx-checkpoints-interval", "1024", "--cache-ram", "16384", "--no-context-shift")
+            } elseif ($useModel -in @("qwen36_27b_bee_q5","qwen36_27b_bee_q6")) {
+                $llamaArgs += @("--kv-unified", "--ctx-checkpoints", "32", "--checkpoint-min-step", "8192", "--cache-ram", "32768", "--no-context-shift", "--no-cache-idle-slots")
+            } elseif ($useMtp) {
+                # Mainline MTP: densify checkpoints (default ~8k waste on divergence -> 1k).
+                # --cache-ram lets older checkpoints spill to system RAM so we can keep 32 of them.
+                # --kv-unified is mainline-only and compatible with MTP (single shared KV pool).
+                $llamaArgs += @("--kv-unified", "--ctx-checkpoints", "32", "--checkpoint-min-step", "1024", "--cache-ram", "16384", "--no-context-shift")
+            } else {
+                $llamaArgs += @("--kv-unified", "--ctx-checkpoints", "32", "--checkpoint-min-step", "1024", "--cache-ram", "16384", "--no-context-shift")
+            }
+            if ($useModel -in @("qwen36_27b_bee_q5","qwen36_27b_bee_q6")) {
+                $llamaArgs += @("--spec-type", "dflash")
+                $llamaArgs += @("--spec-draft-model", $draftModelFile)
+                $llamaArgs += @("--spec-draft-ngl", "all")
+                $llamaArgs += @("--spec-dflash-cross-ctx", "1024")
+                $llamaArgs += @("--spec-draft-n-max", "16", "--spec-dm-controller", "profit")
+                $llamaArgs += @("--cache-type-k", "turbo4", "--cache-type-v", "turbo3_tcq")
+                $llamaArgs += @("--no-mmproj-offload")
+                $llamaArgs += @("--log-verbosity", "2", "--perf", "--metrics", "--log-timestamps", "--log-prefix")
+                $beeDflashLogEnv = @{
+                    GGML_DFLASH_PROFILE = "summary"
+                }
+                foreach ($kv in $beeDflashLogEnv.GetEnumerator()) {
+                    [Environment]::SetEnvironmentVariable($kv.Key, $kv.Value, "Process")
+                    $llamaLaunchEnv[$kv.Key] = $kv.Value
+                }
+                Write-Host "  BeeLlama DFlash activado (draft Q4_K_M, KV turbo4/turbo3_tcq, parallel=1, logs resumen)" -ForegroundColor Cyan
+            } elseif ($useModel -in @("qwen36_27b","qwen36_27b_q6","qwen36_27b_q4_mtp","qwen36_27b_q5_mtp","qwen36_27b_q6_mtp","qwen36_27b_autoround_q6_mtp","qwen36_27b_nvfp4","qwen36_27b_nvfp4_1f")) {
+                if ($useLlamaInstall -eq "ik_llama" -and $useModel -eq "qwen36_27b_q6") {
+                    # Q6_0 KV cache (ik_llama exclusive low-perp variant) — leaves headroom for MTP draft
+                    $llamaArgs += @("-ctk", "q6_0", "-ctv", "q6_0")
+                } elseif ($useModel -in @("qwen36_27b_q4_mtp","qwen36_27b_q5_mtp")) {
+                    $llamaArgs += @("-ctk", "q8_0", "-ctv", "q8_0")
+                } elseif ($useModel -in @("qwen36_27b_nvfp4_1f","qwen36_27b_autoround_q6_mtp")) {
+                    # AutoRound pesa ~1.9 GB menos -> usamos ese margen para subir el KV a
+                    # K q8_0 / V q5_1 (mejor recall fino) con ctx 160k. nvfp4_1f comparte la misma config.
+                    $llamaArgs += @("-ctk", "q8_0", "-ctv", "q5_1")
+                } elseif ($useModel -in @("qwen36_27b_q6_mtp","qwen36_27b_nvfp4")) {
+                    # K/V invertidos vs q4_0/q5_1: mismos bytes pero la mayor precision (q5_1) va a K, que es mas sensible
+                    $llamaArgs += @("-ctk", "q5_1", "-ctv", "q4_0")
+                } else {
+                    $llamaArgs += @("-ctk", "q8_0", "-ctv", "q8_0")
+                }
+            }
+            # q6_mtp y nvfp4_1f dejan VRAM de sobra: el encoder de vision va a GPU (sin --no-mmproj-offload)
+            if ($useModel -in @("qwen36_27b_q6","qwen36_27b_q4_mtp","qwen36_27b_q5_mtp","qwen36_27b_nvfp4") -and $useLlamaInstall -ne "ik_llama") {
+                # --no-mmproj-offload doesn't exist in ik_llama
+                $llamaArgs += @("--no-mmproj-offload")
+            }
+            # MTP (Multi-Token Prediction) — upstream llama.cpp mainline draft-mtp mode.
+            if ($env:OPENCLAW_LLAMA_MTP_ENABLED -eq "1") {
+                if ($useLlamaInstall -eq "ik_llama") {
+                    $llamaArgs += @("-mtp", "--draft-max", $env:OPENCLAW_LLAMA_MTP_DRAFT_N_MAX)
+                    Write-Host "  MTP activado (-mtp --draft-max $($env:OPENCLAW_LLAMA_MTP_DRAFT_N_MAX))" -ForegroundColor Cyan
+                } else {
+                    if ($useModel -eq "qwen36_27b_nvfp4" -and $draftModelFile -and (Test-Path $draftModelFile)) {
+                        $llamaArgs += @("--model-draft", $draftModelFile, "-ngld", "all", "--spec-draft-p-min", "0.3")
+                    }
+                    $llamaArgs += @("--spec-type", "draft-mtp", "--spec-draft-n-max", $env:OPENCLAW_LLAMA_MTP_DRAFT_N_MAX)
+                    $llamaArgs += @("--cache-type-k-draft", "f16", "--cache-type-v-draft", "f16")
+                    $llamaArgs += @("--spec-default")
+                    Write-Host "  MTP activado (--spec-type draft-mtp --spec-draft-n-max $($env:OPENCLAW_LLAMA_MTP_DRAFT_N_MAX), draft KV F16 + --spec-default ngram-mod)" -ForegroundColor Cyan
+                }
             }
         }
         elseif ($useModel -eq "qwen35") {
@@ -234,8 +426,8 @@ else {
             $llamaCmd = ((@($llamaServerExe) + $llamaArgs) | ForEach-Object { if ($_ -match '\s') { "`"$_`"" } else { $_ } }) -join ' '
             $launchScript = Join-Path $openclawRoot "llama-launch.cmd"
             $launchLines = @("@echo off")
-            if ($chatTemplateKwargs) {
-                $launchLines += "set LLAMA_CHAT_TEMPLATE_KWARGS=$chatTemplateKwargs"
+            foreach ($kv in $llamaLaunchEnv.GetEnumerator()) {
+                $launchLines += "set $($kv.Key)=$($kv.Value)"
             }
             $launchLines += "$llamaCmd"
             $launchLines | Set-Content $launchScript -Encoding ASCII
@@ -322,10 +514,42 @@ if ($useWTTabs) {
     wt.exe -w 0 new-tab --title "Hermes Gateway (WSL)" -- wsl.exe -d Ubuntu -- bash -lc "cd '$wslDir' && USE_MODEL='$useModel' USE_BROWSER_TOOL='$browserFlag' USE_TAILSCALE='$tailscaleFlag' ./start-hermes-wsl.sh"
     Write-Host "[OK] Hermes gateway lanzado en pestana WSL" -ForegroundColor Green
 
+    # Hermes Desktop backend: pestana propia con su propio ciclo de reinicio
+    # (independiente del gateway; el update de la app Desktop puede matar este
+    # proceso sin tocar el gateway, y viceversa).
+    Write-Host "  Lanzando Hermes Desktop backend en pestana WSL..." -ForegroundColor DarkCyan
+    wt.exe -w 0 new-tab --title "Hermes Desktop Backend (WSL)" -- wsl.exe -d Ubuntu -- bash -lc "cd '$wslDir' && DESKTOP_SERVE_PORT='$hermesDesktopPort' ./start-hermes-desktop-backend.sh"
+    Write-Host "[OK] Hermes Desktop backend lanzado en pestana WSL" -ForegroundColor Green
+
+    # Port proxy para Hermes Desktop (Windows app -> WSL hermes serve)
+    $wslIp = (wsl.exe -d Ubuntu -- hostname -I).Trim().Split()[0]
+    if ($wslIp) {
+        Write-Host "  Configurando port proxy Hermes Desktop (WSL2 IP: $wslIp)..." -ForegroundColor DarkCyan
+        $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+        $netshSetup = @"
+netsh interface portproxy delete v4tov4 listenport=$hermesDesktopPort listenaddress=0.0.0.0 2>`$null
+netsh interface portproxy add v4tov4 listenport=$hermesDesktopPort listenaddress=0.0.0.0 connectport=$hermesDesktopPort connectaddress=$wslIp
+`$fw = netsh advfirewall firewall show rule name="Hermes Desktop Backend" 2>`$null
+if (`$fw -notmatch 'Hermes Desktop Backend') { netsh advfirewall firewall add rule name="Hermes Desktop Backend" dir=in action=allow protocol=tcp localport=$hermesDesktopPort }
+"@
+        if ($isAdmin) {
+            Invoke-Expression $netshSetup
+        } else {
+            $tmpScript = Join-Path ([System.IO.Path]::GetTempPath()) "hermes-desktop-portproxy-setup.ps1"
+            $netshSetup | Set-Content $tmpScript -Encoding UTF8
+            Start-Process powershell -Verb RunAs -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$tmpScript`"" -WindowStyle Hidden -Wait
+            try { Remove-Item $tmpScript -Force } catch {}
+        }
+        Write-Host "  [OK] Hermes Desktop backend accesible en http://localhost:$hermesDesktopPort" -ForegroundColor Green
+    } else {
+        Write-Host "  [!] No se pudo obtener la IP de WSL2, Hermes Desktop no tendra port proxy" -ForegroundColor Yellow
+    }
+
     # Chat tab: opens hermes TUI after llama-server is ready
-    Write-Host "  Lanzando pestana de chat con Hermes..." -ForegroundColor DarkCyan
-    wt.exe -w 0 new-tab --title "Hermes Chat" -- wsl.exe -d Ubuntu -- bash -l "$wslDir/start-hermes-chat.sh"
-    Write-Host "[OK] Pestana de chat lanzada (esperara a llama-server)" -ForegroundColor Green
+    # Desactivado: no se usa. Descomentar estas 3 lineas para reactivarlo.
+    # Write-Host "  Lanzando pestana de chat con Hermes..." -ForegroundColor DarkCyan
+    # wt.exe -w 0 new-tab --title "Hermes Chat" -- wsl.exe -d Ubuntu -- bash -l "$wslDir/start-hermes-chat.sh"
+    # Write-Host "[OK] Pestana de chat lanzada (esperara a llama-server)" -ForegroundColor Green
 } else {
     Write-Host "  El gateway se lanzara desde WSL manualmente" -ForegroundColor Gray
 }
@@ -413,19 +637,22 @@ if ($brokerScript) {
             $env:OPENCLAW_USE_BACKEND = "llama-server"
 
             $env:OPENCLAW_LLAMA_SLOT_SAVE_PATH = Join-Path $openclawRoot "slot-cache"
+            $env:OPENCLAW_BROKER_LOG_FILE = Join-Path $openclawRoot "broker.log"
             if ($llamaServerExe) { $env:OPENCLAW_LLAMA_SERVER_EXE = $llamaServerExe }
             if ($modelFile) { $env:OPENCLAW_LLAMA_MODEL = $modelFile }
             if ($mmProjFile) { $env:OPENCLAW_LLAMA_MMPROJ = $mmProjFile }
+            if ($draftModelFile) { $env:OPENCLAW_LLAMA_DRAFT_MODEL = $draftModelFile }
             if ($llamaLogFile) { $env:OPENCLAW_LLAMA_LOG_FILE = $llamaLogFile }
             $env:OPENCLAW_LLAMA_PORT = [string]$llamaPort
             $env:OPENCLAW_LLAMA_CTX_SIZE = $ctxSize
-            $env:OPENCLAW_LLAMA_PARALLEL = "1"
+            $env:OPENCLAW_LLAMA_PARALLEL = if ($useModel -in @("qwen36_27b_bee_q5","qwen36_27b_bee_q6","qwen36_27b_q4_mtp","qwen36_27b_q5_mtp","qwen36_27b_q6_mtp","qwen36_27b_autoround_q6_mtp","qwen36_27b_nvfp4","qwen36_27b_nvfp4_1f")) { "1" } else { "2" }
             $env:OPENCLAW_LLAMA_N_GPU_LAYERS = "99"
             $env:OPENCLAW_LLAMA_BATCH_SIZE = "2048"
             $env:OPENCLAW_LLAMA_PROFILE = $useModel
-            if ($useModel -in @("qwen36","qwen36q4","qwen36_27b")) {
-                $env:OPENCLAW_LLAMA_UBATCH_SIZE = "2048"
+            if ($useModel -in @("qwen36","qwen36q4","qwen36_27b_bee_q5","qwen36_27b_bee_q6","qwen36_27b","qwen36_27b_q6","qwen36_27b_q4_mtp","qwen36_27b_q5_mtp","qwen36_27b_q6_mtp","qwen36_27b_autoround_q6_mtp","qwen36_27b_nvfp4","qwen36_27b_nvfp4_1f")) {
+                $env:OPENCLAW_LLAMA_UBATCH_SIZE = if ($useModel -in @("qwen36_27b_q6_mtp","qwen36_27b_autoround_q6_mtp","qwen36_27b_nvfp4","qwen36_27b_nvfp4_1f")) { "1024" } else { "2048" }
                 $env:OPENCLAW_LLAMA_CTX_CHECKPOINTS = "32"
+                $env:OPENCLAW_LLAMA_CHAT_TEMPLATE = Join-Path $openclawRoot "models\qwen36-27b\qwen3.6-enhanced.jinja"
             } elseif ($useModel -eq "qwen35") {
                 $env:OPENCLAW_LLAMA_UBATCH_SIZE = "2048"
                 $env:OPENCLAW_LLAMA_CTX_CHECKPOINTS = "32"
@@ -646,7 +873,8 @@ Write-Host ""
 Write-Host "========================================" -ForegroundColor Magenta
 Write-Host "  Todos los servicios lanzados" -ForegroundColor Green
 Write-Host "  Hermes gateway corriendo en pestana WSL" -ForegroundColor Gray
-if ($useHermesWebUI) { Write-Host "  Hermes WebUI: http://localhost:8787" -ForegroundColor Gray }
+Write-Host "  Hermes Desktop backend: http://localhost:$hermesDesktopPort" -ForegroundColor Gray
+if ($useHermesWebUI) { Write-Host "  Hermes WebUI: https://localhost:8787" -ForegroundColor Gray }
 if ($useOpenWebUI) { Write-Host "  Open WebUI: http://localhost:8080" -ForegroundColor Gray }
 Write-Host "  Presiona Ctrl+C para detener todo" -ForegroundColor Gray
 Write-Host "========================================" -ForegroundColor Magenta

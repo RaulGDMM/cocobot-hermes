@@ -6,12 +6,12 @@ agent:
   name: "Cocobot"
   emoji: "🥥"
   version: "1.0.0"
-  description: "Intelligent AI Agent powered by Qwen3.5 35B A3B (migrated from Openclaw)"
+  description: "Intelligent AI Agent powered by Qwen3.6 27B (local llama.cpp)"
   
 model:
-  name: "qwen3.5-35b-a3b"
-  path: "/app/models/qwen3.5-27b/Qwen3.5-27B-Q4_K_M.gguf"
-  context_size: 262144
+  name: "qwen3.6-27b"
+  path: "/app/models/qwen36-27b/Qwen3.6-27B-UD-Q4_K_XL.gguf"
+  context_size: 150000
   max_tokens: 32768
   embedding: false
   reasoning: true
@@ -31,8 +31,8 @@ server:
   timeout: 300
   
 llama_server:
-  url: "http://localhost:8082"
-  context_size: 262144
+  url: "http://localhost:30000"
+  context_size: 150000
   batch_size: 512
   threads: 8
   n_gpu_layers: 999

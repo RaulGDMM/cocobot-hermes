@@ -1,6 +1,6 @@
 ---
 name: comfyui-local
-description: Generate images locally through the Windows ComfyUI broker using FLUX.1 Dev or FLUX.2 Klein 9B workflows.
+description: Generate images and videos locally through the Windows ComfyUI broker using FLUX.1/FLUX.2 (images) and LTX 2.3 (videos with optional ID-LoRA voice identity).
 metadata:
   {
     "openclaw":
@@ -127,6 +127,8 @@ uv run {baseDir}/scripts/generate_image.py --image "./photo.png" --image2 "./sty
 
 In edit mode, `--aspect`/`--width`/`--height` are ignored (dimensions come from the input image). Default guidance is 2.5 (vs 3.5 for generation). You can override with `--guidance`.
 
+Before image-to-image edits, check the input image dimensions. If the image is larger than about 2MP or its longest side is above 1536px, downscale a temporary copy first and pass that resized file to `--image`. Phone photos such as 3072x4096 will make FLUX.2 Klein sample the full latent and can turn a 3-5s job into many minutes. Prefer a longest side of 1536px for fast edits, 2048px when the user explicitly prioritizes detail, and only keep original size when the user explicitly asks for full-resolution editing.
+
 Prompt tips for editing:
 - Be specific: "Change the car color to red" instead of "make it red"
 - Preserve explicitly: "Change the background to a beach while keeping the person in the same position"
@@ -141,6 +143,8 @@ Notes (images)
 ### FLUX.2 Klein i2i — CRITICAL SETTINGS
 
 FLUX.2 Klein's i2i workflow uses **ReferenceLatent chaining** per the official ComfyUI documentation. Each reference image is independently VAE-encoded and its visual features are injected into conditioning tensors through `ReferenceLatent` nodes that chain sequentially.
+
+**Input size rule:** In i2i mode, the script does not resize with `--width`/`--height`; the encoded latent comes directly from the input image size. Always inspect and downscale oversized input images before running FLUX.2 Klein i2i. Target ~1-2MP / longest side 1536px by default. This preserves the expected fast path and avoids dynamic VRAM/offload behavior that can make each sampler step take tens of seconds.
 
 **Single-image edit workflow:**
 - `LoadImage` → `VAEEncode` → `ReferenceLatent(conditioning, latent)` → `FluxGuidance` → `KSampler`
@@ -212,10 +216,84 @@ Image + Audio (first frame + audio conditioning)
 uv run {baseDir}/scripts/generate_video.py --image "./scene.png" --audio "./narration.wav" --prompt "The narrator describes the scene" --filename "output.mp4"
 ```
 
+Lip-sync mode (best for talking heads / singing)
+
+```bash
+uv run {baseDir}/scripts/generate_video.py --lipsync --image "./portrait.png" --audio "./speech.wav" --prompt "A woman speaking directly to camera" --filename "lipsync_output.mp4"
+```
+
+- Requires both `--image` (face/portrait) and `--audio` (speech/singing audio).
+- Internally uses MelBand RoFormer to isolate vocals from the audio, then conditions video generation on the clean vocal track via a dedicated Audio VAE.
+- Produces significantly better lip synchronisation than regular `--image --audio` (which treats audio as ambient conditioning).
+- **The output video keeps the original audio track** — the script automatically replaces the model-generated audio with the input audio via ffmpeg after generation.
+- Best results with: clear frontal face, clean speech audio, 3-8 second clips.
+
 Custom duration, resolution, and aspect ratio
 
 ```bash
 uv run {baseDir}/scripts/generate_video.py --prompt "A drone shot over a mountain range at sunset" --filename "output.mp4" --duration 10 --resolution 1080p --aspect 16:9
+```
+
+**🚫 Avoid editing `generate_video.py` unless you are explicitly asked to update the workflow itself. It already encodes the official LTX 2.3 ID-LoRA template (two-stage distilled pipeline). Just call it with `--id-lora`.**
+
+ID-LoRA mode (consistent voice identity from a 5-second reference)
+
+ID-LoRA transfers the voice identity from a ~5-second audio reference to generate new speech with the same voice. The model generates both video and audio jointly — no separate TTS step needed. Lip-sync is built-in.
+
+**⚠️ IMPORTANT: Always use the script below. Do NOT construct the ComfyUI workflow JSON manually — the ID-LoRA pipeline mirrors the official `video_ltx2_3_id_lora` ComfyUI template (BF16 checkpoint `ltx-2.3-22b-dev.safetensors` + distilled LoRA + ID-LoRA stacked, two-stage low/high-res with `LTXVLatentUpsampler`, `CFGGuider` cfg=1.0, `euler_ancestral_cfg_pp` / `euler_cfg_pp`, `ManualSigmas`). All the node wiring is handled internally by `generate_video.py --id-lora`.**
+
+```bash
+uv run {baseDir}/scripts/generate_video.py --id-lora \
+  --image "./portrait.png" \
+  --reference-audio "./voice_sample.wav" \
+  --identity-guidance-scale 1.5 \
+  --prompt "[VISUAL]: A person speaks to camera in a cozy room. The character opens its mouth wide to speak clearly, its jaw moving with each word [SPEECH]: Hello, this is what I want to say [SOUNDS]: warm indoor ambience, soft echo" \
+  --filename "output.mp4"
+```
+
+- Requires `--image` (first frame, ideally a face/portrait) and `--reference-audio` (5-second voice sample for identity).
+- The reference audio defines WHO speaks (voice timbre, pitch, cadence). The `[SPEECH]` tag in the prompt defines WHAT they say.
+- The model generates the actual spoken words with the reference voice identity — unlike regular `--audio` mode which only generates ambient sounds.
+- **Prompt format for ID-LoRA** — use structured tags:
+  - `[VISUAL]:` — Scene description (what the camera sees)
+  - `[SPEECH]:` — Exact words the character says (the model will synthesize these)
+  - `[SOUNDS]:` — Vocal quality descriptors + ambient sounds (e.g. "deep male voice, room reverb, rain outside")
+- `--identity-guidance-scale N` (default 3.0) — Controls how strongly the voice identity is preserved. Higher = more faithful to reference but less natural. Range 0-10, sweet spot is 2.0-5.0. **For lip-sync: use 1.5** — lower guidance allows more facial movement while preserving voice identity. Tested and confirmed working on RTX 5090 with full BF16 model.
+- **Language note**: ID-LoRA was trained primarily on English (CelebV-HQ + TalkVid datasets). Spanish works but quality may vary — the voice identity transfers well, but pronunciation/prosody may be less natural than English. Try it and iterate.
+- Best results with: clear 5s voice sample (no background noise), frontal face image, short clips (3-8s).
+- Can be combined with `--duration`, `--resolution`, `--aspect`, `--steps`, `--seed`.
+- **Do NOT combine** with `--lipsync` or `--audio` — ID-LoRA handles voice generation internally.
+- **Do NOT build the workflow JSON manually** — always call `generate_video.py --id-lora` which handles all the complex node wiring internally.
+
+**💡 ID-LoRA — Lip-sync & quality tips (tested on RTX 5090):**
+1. **Use `--identity-guidance-scale 1.5`** (not the default 3.0) — lower guidance = more facial movement while keeping voice identity
+2. **Add mouth movement to `[VISUAL]`**: "The character opens its mouth wide to speak clearly, its jaw moving with each word"
+3. **Use BF16 checkpoint** (`ltx-2.3-22b-dev.safetensors`) — the full model works fine with memory swap and produces better visuals/lip-sync than FP8. Script's `MODEL_IDLORA_CHECKPOINT` is set to BF16.
+4. **Audio glitches at the start**: If you hear artifacts before the main speech, regenerate with a different seed — it's random and usually clears on the second try
+5. **Model location**: User models are in `F:\ComfyUIModels` (not the default ComfyUI path)
+6. **Text length**: Keep `[SPEECH]` to ~10s of spoken text. Longer text (>15s) causes truncation and garbled output. Split into multiple clips if needed.
+
+**⚠️ ID-LoRA rigidity problem (KNOWN):**
+At `strength_model: 1.0` the video is **extremely static/rigid** — barely any motion. Fixes: lower `--identity-guidance-scale` to **1.5** or switch to **CelebVHQ checkpoint** (better motion than TalkVid).
+
+ID-LoRA examples:
+
+Same character, different lines (voice stays consistent across videos):
+
+```bash
+# First video
+uv run {baseDir}/scripts/generate_video.py --id-lora \
+  --image "./gato.png" --reference-audio "./gato_voice.wav" \
+  --identity-guidance-scale 1.5 \
+  --prompt "[VISUAL]: A black cat speaks to camera. The character opens its mouth wide to speak clearly, its jaw moving with each word [SPEECH]: Yo soy el guardian de los secretos [SOUNDS]: deep mysterious male voice, echo" \
+  --filename "scene1.mp4"
+
+# Second video — same voice reference, different text
+uv run {baseDir}/scripts/generate_video.py --id-lora \
+  --image "./gato.png" --reference-audio "./gato_voice.wav" \
+  --identity-guidance-scale 1.5 \
+  --prompt "[VISUAL]: The same black cat turns to look at something off-screen. Opens its mouth wide to speak clearly [SPEECH]: Los humanos no comprenden nuestro poder [SOUNDS]: deep mysterious male voice, wind" \
+  --filename "scene2.mp4"
 ```
 
 Optional quality controls
@@ -251,13 +329,13 @@ Prompt tips for video
 - For image-to-video, describe what should **change** from the static image: "The water begins to flow", "Clouds drift across the sky"
 - Prompts are auto-enhanced by Gemma 3 12B for better results — keep your prompt natural and descriptive
 - **Speech/Lip-sync**: For characters speaking, specify language and accent: "speaking in Spanish with Spanish accent, saying: 'dialogue here'". Note: LTX generates mouth movements but audio will be ambient, not actual speech. For proper voice, generate TTS separately and combine with ffmpeg.
-- The negative prompt is built-in: blurry, watermark, subtitles, etc. Use `--negative-prompt "extra terms"` to **append** to the defaults, or prefix with `!` to fully override: `--negative-prompt "!only these terms"`.
+- The negative prompt is built-in: blurry, watermark, subtitles, etc. Use `--negative-prompt "extra terms"` to **append** to the defaults, or prefix with `--negative-prompt "!only these terms"` to replace entirely.
 
 Notes (video)
 Notes (video)
 - Uses LTX 2.3 with a two-pass pipeline: first pass at half-resolution for structure, then latent upscale + refinement for detail.
 - Audio is generated automatically alongside the video (ambient sounds, effects). No separate audio step needed.
-- **⚠️ VOICE LIMITATION**: LTX 2.3 generates ambient/background audio that "accompanies" the scene — NOT literal voice dubbing or lip-sync speech. If a character speaks in the prompt, the model generates mouth movements but the audio will be atmospheric (room tone, ambient sounds), not actual spoken words. For proper voice sync, use TTS (Qwen3-TTS) separately and combine with ffmpeg afterward.
+- **⚠️ VOICE LIMITATION**: LTX 2.3 generates ambient/background audio that "accompanies" the scene — NOT literal voice dubbing or lip-sync speech. If a character speaks in the prompt, the model generates mouth movements but the audio will be atmospheric (room tone, ambient sounds), not actual spoken words. **EXCEPTION: ID-LoRA mode** (`--id-lora`) generates actual speech with a consistent voice identity from a 5s reference. For other modes, use TTS (Qwen3-TTS) separately and combine with ffmpeg afterward. For **lip synchronisation** (mouth movements matching given audio), use `--lipsync --image face.png --audio speech.wav`.
 - **`--audio`**: optionally provide a local audio file (wav/mp3/ogg/flac/m4a) as a conditioning reference. The model uses it to synchronize video motion to the rhythm, speech, or effects in the audio. The output audio is **regenerated by the model** (not the original file). If the user wants the exact original audio track on the video, replace it afterward with ffmpeg. Can be combined with `--image`.
 - Output format is MP4 (auto codec). Compatible with Telegram and most players.
 - For image-to-video, `--image` accepts a local path. The script uploads it to the broker automatically.

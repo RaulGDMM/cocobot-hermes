@@ -237,6 +237,7 @@ class BrokerConfig:
     llama_port: int
     llama_server_exe: Path | None
     llama_model: Path | None
+    llama_draft_model: Path | None
     llama_mmproj: Path | None
     llama_chat_template: Path | None
     llama_log_file: Path | None
@@ -250,6 +251,14 @@ class BrokerConfig:
     llama_ctx_checkpoints: int
     llama_slot_min_tokens: int
     llama_profile: str
+    llama_temp: str
+    llama_top_p: str
+    llama_top_k: str
+    llama_min_p: str
+    llama_presence_penalty: str
+    llama_predict: str
+    llama_mtp_enabled: bool
+    llama_mtp_draft_n_max: str
 
     @classmethod
     def from_env(cls, broker_port_override: int | None = None) -> "BrokerConfig":
@@ -290,6 +299,7 @@ class BrokerConfig:
             llama_port=env_int("OPENCLAW_LLAMA_PORT", 30000),
             llama_server_exe=optional_path("OPENCLAW_LLAMA_SERVER_EXE"),
             llama_model=optional_path("OPENCLAW_LLAMA_MODEL"),
+            llama_draft_model=optional_path("OPENCLAW_LLAMA_DRAFT_MODEL"),
             llama_mmproj=optional_path("OPENCLAW_LLAMA_MMPROJ"),
             llama_chat_template=optional_path("OPENCLAW_LLAMA_CHAT_TEMPLATE"),
             llama_log_file=optional_path("OPENCLAW_LLAMA_LOG_FILE"),
@@ -298,11 +308,19 @@ class BrokerConfig:
             llama_ctx_size=env_int("OPENCLAW_LLAMA_CTX_SIZE", 131072),
             llama_parallel=env_int("OPENCLAW_LLAMA_PARALLEL", 1),
             llama_n_gpu_layers=env_int("OPENCLAW_LLAMA_N_GPU_LAYERS", 99),
-            llama_batch_size=env_int("OPENCLAW_LLAMA_BATCH_SIZE", 2048),
-            llama_ubatch_size=env_int("OPENCLAW_LLAMA_UBATCH_SIZE", 2048),
+            llama_batch_size=env_int("OPENCLAW_LLAMA_BATCH_SIZE", 4096),
+            llama_ubatch_size=env_int("OPENCLAW_LLAMA_UBATCH_SIZE", 4096),
             llama_ctx_checkpoints=env_int("OPENCLAW_LLAMA_CTX_CHECKPOINTS", 32),
             llama_slot_min_tokens=env_int("OPENCLAW_LLAMA_SLOT_MIN_TOKENS", 200),
             llama_profile=os.environ.get("OPENCLAW_LLAMA_PROFILE", "qwen35").strip().lower(),
+            llama_temp=os.environ.get("OPENCLAW_LLAMA_TEMP", "0.6"),
+            llama_top_p=os.environ.get("OPENCLAW_LLAMA_TOP_P", "0.95"),
+            llama_top_k=os.environ.get("OPENCLAW_LLAMA_TOP_K", "20"),
+            llama_min_p=os.environ.get("OPENCLAW_LLAMA_MIN_P", "0"),
+            llama_presence_penalty=os.environ.get("OPENCLAW_LLAMA_PRESENCE_PENALTY", "0"),
+            llama_predict=os.environ.get("OPENCLAW_LLAMA_PREDICT", "81920"),
+            llama_mtp_enabled=env_bool("OPENCLAW_LLAMA_MTP_ENABLED", False),
+            llama_mtp_draft_n_max=os.environ.get("OPENCLAW_LLAMA_MTP_DRAFT_N_MAX", "3"),
         )
 
     @property
@@ -330,6 +348,7 @@ class GpuExecJob:
     command: list[str]
     timeout_seconds: int
     cwd: str | None = None
+    needs_gpu: bool = True
     created_at: float = field(default_factory=time.time)
     job_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     event: threading.Event = field(default_factory=threading.Event)
@@ -402,6 +421,10 @@ class BrokerState:
         return url_ok(f"{self.config.llama_base_url}/health", timeout=2.0)
 
     def _llama_slot_persistence_supported(self) -> bool:
+        # ik_llama.cpp supports slot save/restore with multimodal models
+        exe = self.config.llama_server_exe
+        if exe and "ik_llama" in str(exe.parent):
+            return True
         mmproj = self.config.llama_mmproj
         return not (mmproj and mmproj.exists())
 
@@ -426,6 +449,11 @@ class BrokerState:
         if isinstance(decoded, int):
             return decoded
         next_token = slot.get("next_token")
+        # ik_llama.cpp puts n_decoded inside next_token (as dict, not list)
+        if isinstance(next_token, dict) and isinstance(next_token.get("n_decoded"), int):
+            n = int(next_token["n_decoded"])
+            if n > 0:
+                return n
         if isinstance(next_token, list) and next_token:
             item = next_token[0]
             if isinstance(item, dict) and isinstance(item.get("n_decoded"), int):
@@ -433,6 +461,11 @@ class BrokerState:
         prompted = slot.get("n_prompt_tokens_processed")
         if isinstance(prompted, int):
             return prompted
+        # ik_llama.cpp: if prompt field has content, the slot has cached tokens
+        prompt = slot.get("prompt")
+        if prompt and isinstance(prompt, str) and len(prompt) > 10:
+            return max(len(prompt) // 4, 1000)  # estimate; enough to pass min threshold
+        return 0
         return 0
 
     def _save_llama_slots(self) -> None:
@@ -455,6 +488,7 @@ class BrokerState:
             return
 
         saved = 0
+        is_ik_llama = self.config.llama_server_exe and "ik_llama" in str(self.config.llama_server_exe.parent)
         for slot in slots:
             if not isinstance(slot, dict):
                 continue
@@ -462,7 +496,9 @@ class BrokerState:
             if not isinstance(slot_id, int):
                 continue
             decoded = self._slot_decoded_tokens(slot)
-            if decoded < self.config.llama_slot_min_tokens:
+            # ik_llama.cpp /slots doesn't expose total KV tokens reliably;
+            # always attempt save and let the server report n_saved
+            if not is_ik_llama and decoded < self.config.llama_slot_min_tokens:
                 continue
             filename = f"slot_{alias}_{slot_id}"
             body = {"id_slot": slot_id, "filename": filename}
@@ -564,14 +600,15 @@ class BrokerState:
         restore_error: str | None = None
 
         with self.swap_lock:
-            llama_was_running = self.llama_is_ready()
+            llama_was_running = self.llama_is_ready() or self._llama_process_exists()
             whisper_was_running = self.whisper_is_running()
             self._log(f"Starting batch of {len(batch)} job(s); llama_running={llama_was_running}, whisper_running={whisper_was_running}")
             if whisper_was_running:
                 self._stop_whisper_server(blocking=False)
-            if llama_was_running:
-                self._log("Stopping llama-server to free VRAM")
-                self._stop_llama_server()
+            # Always attempt to stop llama-server: health check may timeout
+            # if the process is busy loading the model or processing a prompt.
+            self._log("Stopping llama-server to free VRAM")
+            self._stop_llama_server()
 
             started_comfy = self._ensure_comfy_running()
 
@@ -756,6 +793,15 @@ class BrokerState:
 
     # -- llama-server lifecycle -----------------------------------------------
 
+    @staticmethod
+    def _llama_process_exists() -> bool:
+        """Check if any llama-server.exe process is alive (regardless of health check)."""
+        result = subprocess.run(
+            ["tasklist", "/FI", "IMAGENAME eq llama-server.exe", "/NH"],
+            capture_output=True, text=True, creationflags=CREATE_NO_WINDOW, check=False,
+        )
+        return "llama-server.exe" in result.stdout
+
     def _stop_llama_server(self) -> None:
         if self.llama_is_ready():
             self._log("Saving llama KV cache slots before shutdown")
@@ -771,7 +817,7 @@ class BrokerState:
 
         deadline = time.time() + 20
         while time.time() < deadline:
-            if not self.llama_is_ready():
+            if not self._llama_process_exists():
                 self._log("llama-server stopped")
                 return
             time.sleep(1)
@@ -789,13 +835,17 @@ class BrokerState:
         self.config.llama_slot_save_path.mkdir(parents=True, exist_ok=True)
 
         profile = self.config.llama_profile
-        if profile not in {"qwen35", "qwen36", "qwen36q4", "qwen36_27b", "gemma4"}:
+        if profile not in {"qwen35", "qwen36", "qwen36q4", "qwen36_27b_bee_q5", "qwen36_27b_bee_q6", "qwen36_27b", "qwen36_27b_q6", "qwen36_27b_q4_mtp", "qwen36_27b_q5_mtp", "qwen36_27b_q6_mtp", "qwen36_27b_autoround_q6_mtp", "qwen36_27b_nvfp4", "qwen36_27b_nvfp4_1f", "gemma4"}:
             profile = "qwen35"
+
+        is_ik_llama = "ik_llama" in str(self.config.llama_server_exe.parent)
 
         args = [
             str(self.config.llama_server_exe),
             "--model",
             str(self.config.llama_model),
+            "--alias",
+            f"qwen3.6-27b,{profile}",
         ]
 
         if self.config.llama_mmproj and self.config.llama_mmproj.exists():
@@ -808,7 +858,8 @@ class BrokerState:
                 "--slot-save-path",
                 str(self.config.llama_slot_save_path),
                 "--parallel",
-                str(self.config.llama_parallel),
+                # MTP keeps draft state per slot, breaking ik_llama's KV unification.
+                "1" if self.config.llama_mtp_enabled else str(self.config.llama_parallel),
                 "--n-gpu-layers",
                 str(self.config.llama_n_gpu_layers),
                 "--flash-attn",
@@ -823,30 +874,87 @@ class BrokerState:
             ]
         )
 
-        # Lookup decoding: lossless n-gram speculative acceleration (zero quality loss)
-        lookup_cache = Path(self.config.llama_server_exe.parent).parent / "lookup-cache.bin"
-        args.extend(["--lookup-cache-dynamic", str(lookup_cache)])
-
-        # Speculative decoding: ngram-mod (lossless, no draft model needed)
-        args.extend(["--spec-type", "ngram-mod", "--spec-ngram-size-n", "24", "--draft-min", "12", "--draft-max", "48"])
-
-        # Keep restart args aligned with start-openclaw.ps1 profile branches.
+        # Keep restart args aligned with start-hermes.ps1 profile branches.
         if profile == "qwen35":
             args.extend(["--ubatch-size", str(self.config.llama_ubatch_size)])
             if self.config.llama_chat_template and self.config.llama_chat_template.exists():
                 args.extend(["--chat-template-file", str(self.config.llama_chat_template)])
-            args.extend(["--kv-unified", "--ctx-checkpoints", str(self.config.llama_ctx_checkpoints), "--swa-full"])
-        elif profile in ("qwen36", "qwen36q4", "qwen36_27b"):
-            # Qwen3.6 family: jinja, deepseek reasoning, preserve_thinking
-            args.extend(["--ubatch-size", str(self.config.llama_ubatch_size)])
-            args.extend(["--jinja", "--reasoning-format", "deepseek"])
-            if profile == "qwen36_27b":
-                args.extend(["--presence-penalty", "0"])   # dense 27B: no penalty needed
-                args.extend(["-ctk", "q8_0", "-ctv", "q8_0"])  # Q8_0 KV cache + Hadamard rotations
+            if is_ik_llama:
+                args.extend(["--ctx-checkpoints", str(self.config.llama_ctx_checkpoints), "--swa-full"])
             else:
-                args.extend(["--presence-penalty", "1.5"])  # MoE 35B: needs repeat penalty
-            args.extend(["--min-p", "0", "--predict", "81920"])
-            args.extend(["--kv-unified", "--ctx-checkpoints", str(self.config.llama_ctx_checkpoints)])
+                args.extend(["--kv-unified", "--ctx-checkpoints", str(self.config.llama_ctx_checkpoints), "--swa-full"])
+        elif profile in ("qwen36", "qwen36q4", "qwen36_27b_bee_q5", "qwen36_27b_bee_q6", "qwen36_27b", "qwen36_27b_q6", "qwen36_27b_q4_mtp", "qwen36_27b_q5_mtp", "qwen36_27b_q6_mtp", "qwen36_27b_autoround_q6_mtp", "qwen36_27b_nvfp4", "qwen36_27b_nvfp4_1f"):
+            # Qwen3.6 family: jinja, reasoning on, thinking enabled, self-healing template
+            args.extend(["--ubatch-size", str(self.config.llama_ubatch_size)])
+            args.extend(["--jinja", "--reasoning", "on"])
+            if self.config.llama_chat_template and self.config.llama_chat_template.exists():
+                args.extend(["--chat-template-file", str(self.config.llama_chat_template)])
+            args.extend(["--image-min-tokens", "1024"])
+            args.extend(["--image-max-tokens", "1024"])
+            if profile in ("qwen36_27b", "qwen36_27b_q6", "qwen36_27b_q4_mtp", "qwen36_27b_q5_mtp", "qwen36_27b_q6_mtp", "qwen36_27b_autoround_q6_mtp", "qwen36_27b_nvfp4", "qwen36_27b_nvfp4_1f"):
+                # Q6_0 KV (ik_llama low-perp) when MTP is on q6 model — fits 131k ctx with parallel 4 + MTP
+                if self.config.llama_mtp_enabled and profile == "qwen36_27b_q6":
+                    args.extend(["-ctk", "q6_0", "-ctv", "q6_0"])
+                elif profile in ("qwen36_27b_q4_mtp", "qwen36_27b_q5_mtp"):
+                    args.extend(["-ctk", "q8_0", "-ctv", "q8_0"])
+                elif profile in ("qwen36_27b_nvfp4_1f", "qwen36_27b_autoround_q6_mtp"):
+                    # AutoRound pesa ~1.9 GB menos -> usamos ese margen para subir el KV a
+                    # K q8_0 / V q5_1 (mejor recall fino) con ctx 160k. nvfp4_1f comparte la misma config.
+                    args.extend(["-ctk", "q8_0", "-ctv", "q5_1"])
+                elif profile in ("qwen36_27b_q6_mtp", "qwen36_27b_nvfp4"):
+                    # K/V invertidos vs q4_0/q5_1: mismos bytes pero la mayor precision (q5_1) va a K, que es mas sensible
+                    args.extend(["-ctk", "q5_1", "-ctv", "q4_0"])
+                else:
+                    args.extend(["-ctk", "q8_0", "-ctv", "q8_0"])  # Q8_0 KV cache + Hadamard rotations
+            # q6_mtp y nvfp4_1f dejan VRAM de sobra: el encoder de vision va a GPU (sin --no-mmproj-offload)
+            if profile in ("qwen36_27b_q6", "qwen36_27b_q4_mtp", "qwen36_27b_q5_mtp", "qwen36_27b_nvfp4") and not is_ik_llama:
+                args.extend(["--no-mmproj-offload"])  # keep vision encoder on CPU to save VRAM (mainline only)
+            # Sampling params from env vars (set by start-hermes.ps1)
+            args.extend(["--presence-penalty", self.config.llama_presence_penalty])
+            args.extend(["--min-p", self.config.llama_min_p, "--predict", self.config.llama_predict])
+            args.extend(["--temp", self.config.llama_temp, "--top-p", self.config.llama_top_p, "--top-k", self.config.llama_top_k])
+            args.extend(["--no-prefill-assistant"])
+            if is_ik_llama:
+                # ik_llama lacks --kv-unified / --no-cache-idle-slots; checkpoint flag is renamed.
+                args.extend(["--ctx-checkpoints", str(self.config.llama_ctx_checkpoints),
+                              "--ctx-checkpoints-interval", "1024", "--cache-ram", "16384",
+                              "--no-context-shift"])
+            else:
+                if profile in ("qwen36_27b_bee_q5", "qwen36_27b_bee_q6"):
+                    args.extend(["--kv-unified", "--ctx-checkpoints", str(self.config.llama_ctx_checkpoints),
+                                  "--checkpoint-min-step", "8192", "--cache-ram", "32768",
+                                  "--no-context-shift", "--no-cache-idle-slots"])
+                elif self.config.llama_mtp_enabled:
+                    # Mainline MTP: dense checkpoints (1k) + RAM spill so divergent prompts only
+                    # reprocess ~1k tokens instead of ~8k from the default checkpoint spacing.
+                    args.extend(["--kv-unified", "--ctx-checkpoints", str(self.config.llama_ctx_checkpoints),
+                                  "--checkpoint-min-step", "1024", "--cache-ram", "16384",
+                                  "--no-context-shift"])
+                else:
+                    args.extend(["--kv-unified", "--ctx-checkpoints", str(self.config.llama_ctx_checkpoints),
+                                  "--checkpoint-min-step", "1024", "--cache-ram", "16384",
+                                  "--no-context-shift"])
+            if profile in ("qwen36_27b_bee_q5", "qwen36_27b_bee_q6"):
+                if self.config.llama_draft_model and self.config.llama_draft_model.exists():
+                    args.extend(["--spec-type", "dflash"])
+                    args.extend(["--spec-draft-model", str(self.config.llama_draft_model)])
+                    args.extend(["--spec-draft-ngl", "all"])
+                    args.extend(["--spec-dflash-cross-ctx", "1024"])
+                    args.extend(["--spec-draft-n-max", "16", "--spec-dm-controller", "profit"])
+                args.extend(["--cache-type-k", "turbo4", "--cache-type-v", "turbo3_tcq"])
+                args.extend(["--no-mmproj-offload"])
+                args.extend(["--log-verbosity", "2", "--perf", "--metrics", "--log-timestamps", "--log-prefix"])
+            # MTP (Multi-Token Prediction). Upstream llama.cpp uses draft-mtp;
+            # ik_llama used the older -mtp spelling.
+            if self.config.llama_mtp_enabled and profile in ("qwen36_27b", "qwen36_27b_q6", "qwen36_27b_q4_mtp", "qwen36_27b_q5_mtp", "qwen36_27b_q6_mtp", "qwen36_27b_autoround_q6_mtp", "qwen36_27b_nvfp4", "qwen36_27b_nvfp4_1f"):
+                if is_ik_llama:
+                    args.extend(["-mtp", "--draft-max", self.config.llama_mtp_draft_n_max])
+                else:
+                    if profile == "qwen36_27b_nvfp4" and self.config.llama_draft_model and self.config.llama_draft_model.exists():
+                        args.extend(["--model-draft", str(self.config.llama_draft_model), "-ngld", "all", "--spec-draft-p-min", "0.3"])
+                    args.extend(["--spec-type", "draft-mtp", "--spec-draft-n-max", self.config.llama_mtp_draft_n_max])
+                    args.extend(["--cache-type-k-draft", "f16", "--cache-type-v-draft", "f16"])
+                    args.extend(["--spec-default"])
         elif profile == "gemma4":
             args.extend(["--ubatch-size", "512", "--jinja", "-ctk", "f16", "-ctv", "f16", "--repeat-penalty", "1.1"])
         else:
@@ -857,19 +965,27 @@ class BrokerState:
 
         # Environment variables needed by specific profiles
         extra_env: dict[str, str] = {}
-        if profile in ("qwen36", "qwen36q4", "qwen36_27b"):
-            extra_env["LLAMA_CHAT_TEMPLATE_KWARGS"] = '{"enable_thinking":true,"preserve_thinking":true}'
+        if profile in ("qwen36", "qwen36q4", "qwen36_27b_bee_q5", "qwen36_27b_bee_q6", "qwen36_27b", "qwen36_27b_q6", "qwen36_27b_q4_mtp", "qwen36_27b_q5_mtp", "qwen36_27b_q6_mtp", "qwen36_27b_nvfp4", "qwen36_27b_nvfp4_1f"):
+            extra_env["LLAMA_CHAT_TEMPLATE_KWARGS"] = '{"preserve_thinking":true}'
+        if profile in ("qwen36_27b_bee_q5", "qwen36_27b_bee_q6"):
+            extra_env.update(
+                {
+                    "GGML_DFLASH_PROFILE": "summary",
+                }
+            )
 
         if _WT_EXE:
             # Launch as a new tab in the existing Windows Terminal window.
-            # Wrap with "cmd /c ... & exit 0" so the tab auto-closes when
-            # llama-server is killed (exit 0 triggers closeOnExit: graceful).
+            # Write a .cmd script to avoid cmd /c quoting issues with special
+            # characters in env vars (e.g. JSON braces in LLAMA_CHAT_TEMPLATE_KWARGS).
             title = f"llama-server :{self.config.llama_port}"
-            set_cmds = " && ".join(f"set {k}={v}" for k, v in extra_env.items())
-            inner_cmd = subprocess.list2cmdline(args) + " & exit 0"
-            if set_cmds:
-                inner_cmd = set_cmds + " && " + inner_cmd
-            wt_args = [_WT_EXE, "-w", "0", "new-tab", "--title", title, "--", "cmd", "/c", inner_cmd]
+            launch_script = Path(self.config.llama_server_exe).parent.parent / "llama-launch-broker.cmd"
+            lines = ["@echo off"]
+            for k, v in extra_env.items():
+                lines.append(f"set {k}={v}")
+            lines.append(subprocess.list2cmdline(args))
+            launch_script.write_text("\r\n".join(lines), encoding="ascii")
+            wt_args = [_WT_EXE, "-w", "0", "new-tab", "--title", title, "--", "cmd", "/c", f'"{launch_script}" & exit 0']
             process = subprocess.Popen(
                 wt_args,
                 cwd=str(self.config.llama_server_exe.parent),
@@ -932,28 +1048,158 @@ class BrokerState:
                     self.gpu_exec_cond.wait()
                 job = self.gpu_exec_queue.pop(0)
 
+            # For no-gpu jobs, run immediately without any swap logic.
+            if not job.needs_gpu:
+                try:
+                    self._process_gpu_exec(job)
+                except Exception as exc:
+                    self._log(f"gpu-exec worker exception: {exc}")
+                    self._log(traceback.format_exc())
+                    self.last_error = str(exc)
+                    job.error = str(exc)
+                finally:
+                    job.event.set()
+                continue
+
+            # GPU job: batch consecutive GPU jobs to avoid stop/start thrashing.
+            # Collect this job + any others already queued that also need GPU.
+            gpu_batch = [job]
+            with self.gpu_exec_cond:
+                while self.gpu_exec_queue and self.gpu_exec_queue[0].needs_gpu:
+                    gpu_batch.append(self.gpu_exec_queue.pop(0))
+
+            self._process_gpu_exec_batch(gpu_batch)
+
+    def _process_gpu_exec_batch(self, batch: list[GpuExecJob]) -> None:
+        """Run a batch of GPU jobs with a single llama stop/start cycle.
+
+        Stops llama once, runs all jobs sequentially, then restarts llama.
+        Between jobs, checks if more GPU jobs arrived and includes them.
+        """
+        GPU_EXEC_DRAIN_WAIT = 2.0  # seconds to wait for more jobs between executions
+
+        restore_error: str | None = None
+        with self.swap_lock:
+            llama_was_running = self.llama_is_ready() or self._llama_process_exists()
+            whisper_was_running = self.whisper_is_running()
+            self._log(f"gpu-exec batch: {len(batch)} job(s); llama_running={llama_was_running}, whisper_running={whisper_was_running}")
+            if whisper_was_running:
+                self._stop_whisper_server(blocking=False)
+            self._log("Stopping llama-server to free VRAM for gpu-exec batch")
+            self._stop_llama_server()
+
             try:
-                self._process_gpu_exec(job)
-            except Exception as exc:
-                self._log(f"gpu-exec worker exception: {exc}")
-                self._log(traceback.format_exc())
-                self.last_error = str(exc)
-                job.error = str(exc)
+                while batch:
+                    for job in batch:
+                        try:
+                            self._run_gpu_exec_job(job)
+                        except Exception as exc:
+                            self._log(f"gpu-exec worker exception: {exc}")
+                            self._log(traceback.format_exc())
+                            self.last_error = str(exc)
+                            job.error = str(exc)
+                        finally:
+                            job.event.set()
+
+                    # After processing batch, wait briefly for more arriving jobs.
+                    batch = []
+                    with self.gpu_exec_cond:
+                        self.gpu_exec_cond.wait(timeout=GPU_EXEC_DRAIN_WAIT)
+                        while self.gpu_exec_queue and self.gpu_exec_queue[0].needs_gpu:
+                            batch.append(self.gpu_exec_queue.pop(0))
+                    if batch:
+                        self._log(f"gpu-exec batch: draining {len(batch)} more job(s) without restarting llama")
             finally:
-                job.event.set()
+                if llama_was_running:
+                    try:
+                        self._log("Restarting llama-server after gpu-exec batch")
+                        self._start_llama_server()
+                        self._warmup_llama_server()
+                        self._restore_llama_slots()
+                        self._log("llama-server restored and ready after gpu-exec batch")
+                    except Exception as exc:
+                        restore_error = f"Failed to restore llama-server: {exc}"
+                        self.last_error = restore_error
+                        self._log(restore_error)
+                if whisper_was_running:
+                    try:
+                        self._start_whisper_server()
+                    except Exception as exc:
+                        self._log(f"Warning: failed to restart whisper-server: {exc}")
+
+        if restore_error:
+            # Mark any remaining un-errored jobs with the restore error
+            pass  # jobs already signaled
+
+    def _run_gpu_exec_job(self, job: GpuExecJob) -> None:
+        """Execute a single gpu-exec job (llama already stopped)."""
+        cmd_preview = " ".join(job.command[:6])
+        self._log(f"gpu-exec {job.job_id}: running command={cmd_preview!r}")
+        try:
+            result = subprocess.run(
+                job.command,
+                capture_output=True,
+                text=True,
+                timeout=job.timeout_seconds,
+                cwd=job.cwd,
+            )
+            job.result = {
+                "job_id": job.job_id,
+                "exit_code": result.returncode,
+                "stdout": result.stdout,
+                "stderr": result.stderr,
+            }
+            self._log(f"gpu-exec {job.job_id}: exit_code={result.returncode}")
+            if result.returncode != 0:
+                job.error = f"Command exited with code {result.returncode}"
+        except subprocess.TimeoutExpired:
+            job.error = f"Command timed out after {job.timeout_seconds}s"
+            job.result = {"job_id": job.job_id, "exit_code": -1, "stdout": "", "stderr": "Timed out"}
+            self._log(f"gpu-exec {job.job_id}: TIMED OUT")
+        except FileNotFoundError as exc:
+            job.error = f"Command not found: {exc}"
+            self._log(f"gpu-exec {job.job_id}: {job.error}")
 
     def _process_gpu_exec(self, job: GpuExecJob) -> None:
         restore_error: str | None = None
+        cmd_preview = " ".join(job.command[:6])  # log first few args for debugging
+        self._log(f"gpu-exec {job.job_id}: command={cmd_preview!r}, needs_gpu={job.needs_gpu}")
+
+        # If the job doesn't need GPU, run it directly without swapping llama/whisper.
+        if not job.needs_gpu:
+            try:
+                result = subprocess.run(
+                    job.command,
+                    capture_output=True,
+                    text=True,
+                    timeout=job.timeout_seconds,
+                    cwd=job.cwd,
+                )
+                job.result = {
+                    "job_id": job.job_id,
+                    "exit_code": result.returncode,
+                    "stdout": result.stdout,
+                    "stderr": result.stderr,
+                }
+                self._log(f"gpu-exec {job.job_id} (no-gpu): exit_code={result.returncode}")
+                if result.returncode != 0:
+                    job.error = f"Command exited with code {result.returncode}"
+            except subprocess.TimeoutExpired:
+                job.error = f"Command timed out after {job.timeout_seconds}s"
+                job.result = {"job_id": job.job_id, "exit_code": -1, "stdout": "", "stderr": "Timed out"}
+            except FileNotFoundError as exc:
+                job.error = f"Command not found: {exc}"
+            return
 
         with self.swap_lock:
-            llama_was_running = self.llama_is_ready()
+            llama_was_running = self.llama_is_ready() or self._llama_process_exists()
             whisper_was_running = self.whisper_is_running()
             self._log(f"gpu-exec {job.job_id}: starting command; llama_running={llama_was_running}, whisper_running={whisper_was_running}")
             if whisper_was_running:
                 self._stop_whisper_server(blocking=False)
-            if llama_was_running:
-                self._log("Stopping llama-server to free VRAM for gpu-exec")
-                self._stop_llama_server()
+            # Always stop llama-server (may be busy but still holding VRAM)
+            self._log("Stopping llama-server to free VRAM for gpu-exec")
+            self._stop_llama_server()
 
             try:
                 result = subprocess.run(
@@ -1237,6 +1483,7 @@ class BrokerHandler(BaseHTTPRequestHandler):
         cwd = payload.get("cwd")
         async_mode = payload.get("async", False)
         use_wsl = payload.get("wsl", False)
+        needs_gpu = payload.get("needs_gpu", True)
 
         # Auto-wrap command with WSL if requested
         if use_wsl:
@@ -1246,6 +1493,7 @@ class BrokerHandler(BaseHTTPRequestHandler):
             command=command,
             timeout_seconds=timeout_seconds,
             cwd=cwd,
+            needs_gpu=bool(needs_gpu),
         )
         self.state.enqueue_gpu_exec(job)
         self.state._log(f"gpu-exec job {job.job_id} queued (timeout={timeout_seconds}s, async={async_mode})")
@@ -1344,11 +1592,14 @@ class BrokerHandler(BaseHTTPRequestHandler):
 
     def _send_json(self, status_code: int, payload: dict[str, Any]) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        self.send_response(status_code)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.send_response(status_code)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError):
+            pass  # Client disconnected before response was sent
 
     def log_message(self, format: str, *args: Any) -> None:
         _raw_log(f"HTTP {format % args}")
