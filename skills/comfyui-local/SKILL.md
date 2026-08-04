@@ -32,10 +32,12 @@ Use `--model` to choose the image generation model. Default is `flux2-klein-9b`.
 
 | Model | Flag | Quality | Speed (RTX 5090) | VRAM | Text | Best for |
 |-------|------|---------|-------------------|------|------|----------|
-| FLUX.1 Dev | `--model flux1-dev` | High | ~8-12s | ~16GB | Good | General use, balanced |
-| FLUX.2 Klein 9B | `--model flux2-klein-9b` | Higher | ~3-5s | ~12GB | Excellent | Speed + quality, text rendering |
+| FLUX.1 Dev | `--model flux1-dev` | High | ~8-12s | ~16GB | Good | Character consistency and detailed recurring subjects |
+| FLUX.2 Klein 9B | `--model flux2-klein-9b` | Higher | ~3-5s | ~12GB | Excellent | Speed, text rendering, landscapes and iteration |
 
 FLUX.2 Klein 9B is a distillation of FLUX.2 Dev (32B) into a compact 9B model. It inherits FLUX.2's architecture: better prompt adherence, superior text rendering, improved anatomy, and higher native resolution (4MP vs 1MP). Despite being smaller than FLUX.1 Dev (12B), it outperforms it due to the FLUX.2 architecture.
+
+For video series with recurring characters, prefer FLUX.1 Dev for character reference frames and FLUX.2 Klein for backgrounds, landscapes, text-heavy shots, and rapid iteration.
 
 ## Before calling the script
 
@@ -273,6 +275,11 @@ uv run {baseDir}/scripts/generate_video.py --lipsync --image "./portrait.png" --
 - **The output video keeps the original audio track** — the script automatically replaces the model-generated audio with the input audio via ffmpeg after generation.
 - Best results with: clear frontal face, clean speech audio, 3-8 second clips.
 
+**Lip-sync prompt rules:**
+- Include the exact spoken text in quotes and identify the language/accent so the mouth motion has matching phonetic guidance.
+- Analyze the source image before writing the prompt, especially for panels, ornamental frames, or multi-subject compositions.
+- Default to a static camera for structured source images; zooms and pans can deform their layout.
+
 Custom duration, resolution, and aspect ratio
 
 ```bash
@@ -340,6 +347,12 @@ uv run {baseDir}/scripts/generate_video.py --id-lora \
   --prompt "[VISUAL]: The same black cat turns to look at something off-screen. Opens its mouth wide to speak clearly [SPEECH]: Los humanos no comprenden nuestro poder [SOUNDS]: deep mysterious male voice, wind" \
   --filename "scene2.mp4"
 ```
+
+### Visual character consistency across clips
+
+- Generate the initial reference set with FLUX.1 Dev when identity consistency matters most.
+- For stronger persistence, train an LTX 2.3 Character LoRA from 10–20 varied frames; use IC-LoRA when pose or structural control is the priority.
+- Character LoRA and ID-LoRA can be combined to keep visual and voice identity consistent. See `references/ltx-2-3-lora-training.md` and `references/id-lora-voice.md`.
 
 Optional quality controls
 
@@ -592,3 +605,4 @@ uv run {baseDir}/scripts/generate_speech.py --text "Hi there" --speaker Mochi --
 - English, Spanish, Chinese, and other languages are all supported. Use `--language English` to force English if auto-detection fails.
 - If no `--ref-audio` and no `--speaker` and no `--design` are given, the script uses the default Cocobot voice (from `assets/cocobot-voice-ref.wav`).
 - Use `exec timeout=900` when calling from sandbox to match the broker timeout.
+- For production clips, add 0.3s trailing silence and verify the spoken content with Whisper before using it in video. The complete generate/download/pad/verify procedure is in `references/tts-workflow.md`.
