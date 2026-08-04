@@ -1,6 +1,6 @@
 ---
 name: comfyui-local
-description: Generate images and videos locally through the Windows ComfyUI broker using FLUX.1/FLUX.2 (images) and LTX 2.3 (videos with optional ID-LoRA voice identity).
+description: Generate images and videos locally through the Windows ComfyUI broker using FLUX, LTX 2.3, and MiniMax H3.
 metadata:
   {
     "openclaw":
@@ -186,11 +186,56 @@ FLUX.2 Klein's i2i workflow uses **ReferenceLatent chaining** per the official C
 
 ---
 
-# ComfyUI Local — Video Generation (LTX 2.3)
+# ComfyUI Local — Video Generation (LTX 2.3 and MiniMax H3)
 
 Use the bundled script to generate videos locally through the broker on the Windows host.
 
 Before calling the script, always send a short confirmation message to the user with the `message` tool. Example: `Ok, voy a generar un video de 5 segundos en 720p de un gato jugando. Tardará unos minutos.`
+
+## MiniMax H3
+
+Select H3 explicitly with `--engine minimax-h3`. It generates native stereo audio jointly with the video and runs at a fixed 24 fps. Normal-quality generations should use the default 20 steps; lower step counts are only smoke tests.
+
+Text-to-video:
+
+```bash
+uv run {baseDir}/scripts/generate_video.py --engine minimax-h3 \
+  --prompt 'A cinematic storm over a futuristic city. Stereo audio: rain and distant thunder.' \
+  --filename h3-t2v.mp4
+```
+
+Image-to-video supports an initial frame, a final frame, or both:
+
+```bash
+# Initial frame
+uv run {baseDir}/scripts/generate_video.py --engine minimax-h3 \
+  --image first.png --prompt 'The subject turns toward the camera' --filename h3-first.mp4
+
+# Final frame only
+uv run {baseDir}/scripts/generate_video.py --engine minimax-h3 \
+  --end-image last.png --prompt 'The scene evolves naturally into the supplied final frame' --filename h3-last.mp4
+
+# Initial and final frames
+uv run {baseDir}/scripts/generate_video.py --engine minimax-h3 \
+  --image first.png --end-image last.png --prompt 'A smooth transition between both frames' --filename h3-both.mp4
+```
+
+Reference-to-video accepts up to nine images. Their command-line order defines the prompt tags `<Picture 1>`, `<Picture 2>`, etc. Reference images cannot be combined with first/last-frame conditioning.
+
+```bash
+uv run {baseDir}/scripts/generate_video.py --engine minimax-h3 \
+  --reference-image character.png --reference-image style.png \
+  --prompt 'Use <Picture 1> for character identity and <Picture 2> for visual style. The character walks through a rainy street.' \
+  --filename h3-reference.mp4
+```
+
+- `--ref-image-size match` is the default and fastest. Use `max` only when stronger identity fidelity justifies much higher compute cost.
+- H3 supports 1–15 seconds; frame counts are automatically aligned to the model's 17k+5 temporal grid.
+- H3 presets are multiples of 32. Its `720p` preset maps to the native 1344×768 canvas.
+- Do not combine H3 with LTX-only flags such as `--audio`, `--lipsync`, `--id-lora`, or `--reference-audio`.
+- The broker prepares prompts and uploads while Qwen is active, unloads llama.cpp for the GPU job, and restores the exact Qwen profile afterward.
+
+## LTX 2.3
 
 Text-to-Video (basic)
 
@@ -328,14 +373,14 @@ Prompt tips for video
 - Include environment details: "in a sunlit forest", "during heavy rain at night"
 - For image-to-video, describe what should **change** from the static image: "The water begins to flow", "Clouds drift across the sky"
 - Prompts are auto-enhanced by Gemma 3 12B for better results — keep your prompt natural and descriptive
-- **Speech/Lip-sync**: For characters speaking, specify language and accent: "speaking in Spanish with Spanish accent, saying: 'dialogue here'". Note: LTX generates mouth movements but audio will be ambient, not actual speech. For proper voice, generate TTS separately and combine with ffmpeg.
+- **Speech/Lip-sync**: LTX 2.3 can generate real spoken dialogue natively. Specify the language/accent and put the exact line in quotes, for example: `speaking in Spanish with a Spanish accent, saying: "Hola"`.
 - The negative prompt is built-in: blurry, watermark, subtitles, etc. Use `--negative-prompt "extra terms"` to **append** to the defaults, or prefix with `--negative-prompt "!only these terms"` to replace entirely.
 
 Notes (video)
 Notes (video)
 - Uses LTX 2.3 with a two-pass pipeline: first pass at half-resolution for structure, then latent upscale + refinement for detail.
 - Audio is generated automatically alongside the video (ambient sounds, effects). No separate audio step needed.
-- **⚠️ VOICE LIMITATION**: LTX 2.3 generates ambient/background audio that "accompanies" the scene — NOT literal voice dubbing or lip-sync speech. If a character speaks in the prompt, the model generates mouth movements but the audio will be atmospheric (room tone, ambient sounds), not actual spoken words. **EXCEPTION: ID-LoRA mode** (`--id-lora`) generates actual speech with a consistent voice identity from a 5s reference. For other modes, use TTS (Qwen3-TTS) separately and combine with ffmpeg afterward. For **lip synchronisation** (mouth movements matching given audio), use `--lipsync --image face.png --audio speech.wav`.
+- **Voice generation**: LTX 2.3 generates real voices and spoken words jointly with video. State the language explicitly and quote the exact dialogue. ID-LoRA adds consistent voice identity from a reference sample; `--lipsync` is for matching a supplied audio recording.
 - **`--audio`**: optionally provide a local audio file (wav/mp3/ogg/flac/m4a) as a conditioning reference. The model uses it to synchronize video motion to the rhythm, speech, or effects in the audio. The output audio is **regenerated by the model** (not the original file). If the user wants the exact original audio track on the video, replace it afterward with ffmpeg. Can be combined with `--image`.
 - Output format is MP4 (auto codec). Compatible with Telegram and most players.
 - For image-to-video, `--image` accepts a local path. The script uploads it to the broker automatically.

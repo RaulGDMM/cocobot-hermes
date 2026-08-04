@@ -2,7 +2,7 @@
 # /// script
 # requires-python = ">=3.10"
 # ///
-"""Generate videos locally through the OpenClaw ComfyUI broker (LTX 2.3)."""
+"""Generate videos locally through the ComfyUI broker (LTX 2.3 or MiniMax H3)."""
 
 from __future__ import annotations
 
@@ -37,6 +37,12 @@ MODEL_AUDIO_VAE = "ltx-2.3-22b-dev_audio_vae.safetensors"
 MODEL_MELBAND = "MelBandRoformer_fp32.safetensors"
 MODEL_IDLORA = "ltx-2.3-id-lora-talkvid-3k.safetensors"
 
+H3_MODEL_FL2VA = "minimax_h3_fl2va_pruned_int8_convrot.safetensors"
+H3_MODEL_REF2VA = "minimax_h3_ref2va_pruned_int8_convrot.safetensors"
+H3_TEXT_ENCODER = "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors"
+H3_VIDEO_VAE = "minimax_h3_video_vae_fp16.safetensors"
+H3_AUDIO_VAE = "minimax_h3_audio_vae_fp32.safetensors"
+
 # ID-LoRA pipeline (matches the official "video_ltx2_3_id_lora" template):
 # uses the FP8 checkpoint + the v1.0 distilled LoRA at 0.5 strength stacked
 # with the ID-LoRA at 1.0 strength, two-stage low/high-res with latent
@@ -68,11 +74,37 @@ VIDEO_PRESETS = {
     "1080p-3:4": (1088, 1440),
 }
 
+# MiniMax H3 requires both dimensions to be multiples of 32. The 720p preset
+# maps to H3's native 768px-short-edge canvas; 1080p is the optional ~2MP mode.
+H3_VIDEO_PRESETS = {
+    "480p-16:9": (864, 480),
+    "480p-4:3": (640, 480),
+    "480p-1:1": (480, 480),
+    "480p-9:16": (480, 864),
+    "480p-3:4": (480, 640),
+    "720p-16:9": (1344, 768),
+    "720p-4:3": (1024, 768),
+    "720p-1:1": (768, 768),
+    "720p-9:16": (768, 1344),
+    "720p-3:4": (768, 1024),
+    "1080p-16:9": (1920, 1088),
+    "1080p-4:3": (1632, 1216),
+    "1080p-1:1": (1408, 1408),
+    "1080p-9:16": (1088, 1920),
+    "1080p-3:4": (1216, 1632),
+}
+
 
 def duration_to_frames(seconds: float, fps: int = DEFAULT_FPS) -> int:
     """Convert seconds to LTX frame count (must be 8k+1)."""
     raw = seconds * fps
     return round(raw / 8) * 8 + 1
+
+
+def h3_duration_to_frames(seconds: float) -> int:
+    """Convert seconds to MiniMax H3's 17k+5 frame grid at fixed 24 fps."""
+    raw = max(5, round(seconds * 24))
+    return raw + (5 - raw % 17) % 17
 
 
 # ---------------------------------------------------------------------------
@@ -1581,6 +1613,156 @@ def build_idlora_workflow(
 
 
 # ---------------------------------------------------------------------------
+# MiniMax H3 workflow (T2V / first-last-frame I2V / reference-image R2V)
+# ---------------------------------------------------------------------------
+
+def build_h3_workflow(
+    *,
+    prompt: str,
+    filename_prefix: str,
+    width: int,
+    height: int,
+    frames: int,
+    steps: int,
+    seed: int,
+    input_image: str | None = None,
+    input_end_image: str | None = None,
+    reference_images: list[str] | None = None,
+    ref_image_size: str = "match",
+) -> dict[str, object]:
+    """Build a native MiniMax H3 ComfyUI workflow in API format."""
+    references = reference_images or []
+    if len(references) > 9:
+        raise ValueError("MiniMax H3 supports at most 9 reference images")
+    if references and (input_image or input_end_image):
+        raise ValueError("H3 reference mode cannot be combined with first/last keyframes")
+
+    model_name = H3_MODEL_REF2VA if references else H3_MODEL_FL2VA
+    conditioning_inputs: dict[str, object] = {
+        "clip": ["2", 0],
+        "vae": ["3", 0],
+        "prompt": prompt,
+        "width": width,
+        "height": height,
+        "length": frames,
+    }
+    workflow: dict[str, object] = {
+        "1": {
+            "class_type": "UNETLoader",
+            "inputs": {"unet_name": model_name, "weight_dtype": "default"},
+        },
+        "2": {
+            "class_type": "CLIPLoader",
+            "inputs": {
+                "clip_name": H3_TEXT_ENCODER,
+                "type": "minimax",
+                "device": "default",
+            },
+        },
+        "3": {
+            "class_type": "VAELoader",
+            "inputs": {"vae_name": H3_VIDEO_VAE},
+        },
+        "4": {
+            "class_type": "VAELoader",
+            "inputs": {"vae_name": H3_AUDIO_VAE},
+        },
+    }
+
+    if references:
+        conditioning_inputs.update(
+            {
+                "audio_vae": ["4", 0],
+                "ref_image_size": ref_image_size,
+            }
+        )
+        for index, image_name in enumerate(references):
+            node_id = str(20 + index)
+            workflow[node_id] = {
+                "class_type": "LoadImage",
+                "inputs": {"image": image_name},
+            }
+            conditioning_inputs[f"ref_images.ref_image_{index}"] = [node_id, 0]
+        conditioning_type = "MiniMaxH3ReferenceToVideo"
+    else:
+        if input_image:
+            workflow["20"] = {
+                "class_type": "LoadImage",
+                "inputs": {"image": input_image},
+            }
+            conditioning_inputs["first_frame"] = ["20", 0]
+        if input_end_image:
+            workflow["21"] = {
+                "class_type": "LoadImage",
+                "inputs": {"image": input_end_image},
+            }
+            conditioning_inputs["last_frame"] = ["21", 0]
+        conditioning_type = "MiniMaxH3ImageToVideo"
+
+    workflow.update(
+        {
+            "5": {
+                "class_type": conditioning_type,
+                "inputs": conditioning_inputs,
+            },
+            "6": {
+                "class_type": "BasicGuider",
+                "inputs": {"model": ["1", 0], "conditioning": ["5", 0]},
+            },
+            "7": {
+                "class_type": "BasicScheduler",
+                "inputs": {
+                    "model": ["1", 0],
+                    "scheduler": "simple",
+                    "steps": steps,
+                    "denoise": 1.0,
+                },
+            },
+            "8": {
+                "class_type": "RandomNoise",
+                "inputs": {"noise_seed": seed, "control_after_generate": "fixed"},
+            },
+            "9": {
+                "class_type": "KSamplerSelect",
+                "inputs": {"sampler_name": "res_multistep"},
+            },
+            "10": {
+                "class_type": "SamplerCustomAdvanced",
+                "inputs": {
+                    "noise": ["8", 0],
+                    "guider": ["6", 0],
+                    "sampler": ["9", 0],
+                    "sigmas": ["7", 0],
+                    "latent_image": ["5", 1],
+                },
+            },
+            "11": {
+                "class_type": "VAEDecode",
+                "inputs": {"samples": ["10", 0], "vae": ["3", 0]},
+            },
+            "12": {
+                "class_type": "VAEDecodeAudio",
+                "inputs": {"samples": ["10", 0], "vae": ["4", 0]},
+            },
+            "13": {
+                "class_type": "CreateVideo",
+                "inputs": {"images": ["11", 0], "audio": ["12", 0], "fps": 24.0},
+            },
+            "14": {
+                "class_type": "SaveVideo",
+                "inputs": {
+                    "video": ["13", 0],
+                    "filename_prefix": filename_prefix,
+                    "format": "auto",
+                    "codec": "auto",
+                },
+            },
+        }
+    )
+    return workflow
+
+
+# ---------------------------------------------------------------------------
 # Network helpers (same pattern as generate_image.py)
 # ---------------------------------------------------------------------------
 
@@ -1712,6 +1894,7 @@ def generate_video(
     *,
     broker_url: str,
     timeout_seconds: int,
+    engine: str,
     prompt: str,
     output_path: Path,
     width: int,
@@ -1726,6 +1909,8 @@ def generate_video(
     lipsync: bool = False,
     id_lora: bool = False,
     reference_audio: str | None = None,
+    reference_images: list[str] | None = None,
+    ref_image_size: str = "match",
     identity_guidance_scale: float = 3.0,
     original_audio_path: Path | None = None,
     negative_prompt: str = NEGATIVE_PROMPT,
@@ -1734,7 +1919,30 @@ def generate_video(
     prefix = f"openclaw-local-output_{output_path.stem}-{seed}"
 
     audio_tag = "+audio" if input_audio else ""
-    if id_lora and input_image and reference_audio:
+    if engine == "minimax-h3":
+        workflow = build_h3_workflow(
+            prompt=prompt,
+            filename_prefix=prefix,
+            width=width,
+            height=height,
+            frames=frames,
+            steps=steps,
+            seed=seed,
+            input_image=input_image,
+            input_end_image=input_end_image,
+            reference_images=reference_images,
+            ref_image_size=ref_image_size,
+        )
+        if reference_images:
+            label = f"h3-r2v ({len(reference_images)} refs), seed={seed}, {width}x{height}, {frames}f"
+        elif input_image or input_end_image:
+            keyframes = "+".join(
+                name for name, present in (("first", input_image), ("last", input_end_image)) if present
+            )
+            label = f"h3-i2v ({keyframes}), seed={seed}, {width}x{height}, {frames}f"
+        else:
+            label = f"h3-t2v, seed={seed}, {width}x{height}, {frames}f"
+    elif id_lora and input_image and reference_audio:
         workflow = build_idlora_workflow(
             prompt=prompt,
             filename_prefix=prefix,
@@ -1877,12 +2085,30 @@ def generate_video(
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Generate videos locally through the ComfyUI broker (LTX 2.3)"
+        description="Generate videos locally through the ComfyUI broker (LTX 2.3 or MiniMax H3)"
+    )
+    parser.add_argument(
+        "--engine",
+        choices=["ltx23", "minimax-h3"],
+        default="ltx23",
+        help="Generation engine (default: ltx23)",
     )
     parser.add_argument("--prompt", "-p", required=True, help="Video description (t2v) or action description (i2v)")
     parser.add_argument("--filename", "-f", required=True, help="Output filename (e.g. output.mp4)")
     parser.add_argument("--image", "-i", default=None, help="First-frame image for image-to-video mode")
-    parser.add_argument("--end-image", default=None, help="Last-frame image for start+end frame conditioning (requires --image)")
+    parser.add_argument("--end-image", default=None, help="Last-frame image (H3 also supports this without --image)")
+    parser.add_argument(
+        "--reference-image",
+        action="append",
+        default=[],
+        help="H3 reference image; repeat up to 9 times in <Picture N> order",
+    )
+    parser.add_argument(
+        "--ref-image-size",
+        choices=["match", "max"],
+        default="match",
+        help="H3 reference sizing: match is faster; max preserves more identity detail",
+    )
     parser.add_argument("--audio", default=None, help="Audio file to condition the video on (wav/mp3/ogg/flac/m4a)")
     parser.add_argument("--lipsync", action="store_true", help="Lip-sync mode: isolate vocals with MelBand RoFormer for better lip synchronisation (requires --image and --audio)")
     parser.add_argument("--id-lora", action="store_true", help="ID-LoRA mode: transfer voice identity from a ~5s reference audio to generate speech with consistent voice (requires --image and --reference-audio)")
@@ -1918,6 +2144,33 @@ def main() -> int:
     parser.add_argument("--broker-url", default=None, help="Broker base URL override")
     args = parser.parse_args()
 
+    is_h3 = args.engine == "minimax-h3"
+    if is_h3:
+        incompatible = []
+        if args.lipsync:
+            incompatible.append("--lipsync")
+        if args.id_lora:
+            incompatible.append("--id-lora")
+        if args.audio:
+            incompatible.append("--audio")
+        if args.reference_audio:
+            incompatible.append("--reference-audio")
+        if incompatible:
+            print(f"MiniMax H3 does not support these LTX options: {', '.join(incompatible)}", file=sys.stderr)
+            return 1
+        if args.reference_image and (args.image or args.end_image):
+            print("H3 --reference-image cannot be combined with --image/--end-image", file=sys.stderr)
+            return 1
+        if len(args.reference_image) > 9:
+            print("MiniMax H3 supports at most 9 --reference-image values", file=sys.stderr)
+            return 1
+        if args.fps is not None and args.fps != 24:
+            print("MiniMax H3 runs at a fixed 24 fps", file=sys.stderr)
+            return 1
+    elif args.reference_image:
+        print("--reference-image requires --engine minimax-h3", file=sys.stderr)
+        return 1
+
     broker_url = (
         args.broker_url
         or os.environ.get("OPENCLAW_COMFYUI_LOCAL_BROKER_URL")
@@ -1931,18 +2184,21 @@ def main() -> int:
 
     # Resolve resolution + aspect -> width x height
     preset_key = f"{args.resolution}-{args.aspect}"
-    if preset_key not in VIDEO_PRESETS:
+    presets = H3_VIDEO_PRESETS if is_h3 else VIDEO_PRESETS
+    if preset_key not in presets:
         print(f"Invalid preset combination: {preset_key}", file=sys.stderr)
         return 1
-    width, height = VIDEO_PRESETS[preset_key]
+    width, height = presets[preset_key]
 
     # Default fps depends on the mode (ID-LoRA template runs at 25 fps).
-    if args.fps is None:
+    if is_h3:
+        args.fps = 24
+    elif args.fps is None:
         args.fps = IDLORA_DEFAULT_FPS if getattr(args, "id_lora", False) else DEFAULT_FPS
 
     # Duration -> frames
-    duration = max(1.0, min(args.duration, 20.0))
-    frames = duration_to_frames(duration, args.fps)
+    duration = max(1.0, min(args.duration, 15.0 if is_h3 else 20.0))
+    frames = h3_duration_to_frames(duration) if is_h3 else duration_to_frames(duration, args.fps)
 
     seed = args.seed if args.seed is not None else int(time.time() * 1000) % 2147483647
     count = max(1, min(args.count, 10))
@@ -1966,7 +2222,7 @@ def main() -> int:
     # Upload end image if provided
     uploaded_end_image: str | None = None
     if args.end_image:
-        if not args.image:
+        if not args.image and not is_h3:
             print("--end-image requires --image (start frame)", file=sys.stderr)
             return 1
         end_image_path = Path(args.end_image)
@@ -1979,6 +2235,22 @@ def main() -> int:
             print(f"Uploaded as: {uploaded_end_image}")
         except Exception as exc:
             print(f"Error uploading end image: {exc}", file=sys.stderr)
+            return 1
+
+    # Upload H3 reference images in the same order used by <Picture N> tags.
+    uploaded_reference_images: list[str] = []
+    for index, reference in enumerate(args.reference_image, start=1):
+        reference_path = Path(reference)
+        if not reference_path.exists():
+            print(f"Reference image {index} not found: {reference_path}", file=sys.stderr)
+            return 1
+        print(f"Uploading reference image {index}: {reference_path}")
+        try:
+            uploaded = upload_file(broker_url, reference_path)
+            uploaded_reference_images.append(uploaded)
+            print(f"Uploaded as <Picture {index}>: {uploaded}")
+        except Exception as exc:
+            print(f"Error uploading reference image {index}: {exc}", file=sys.stderr)
             return 1
 
     # Upload audio if provided
@@ -2034,11 +2306,22 @@ def main() -> int:
             print(f"Error uploading reference audio: {exc}", file=sys.stderr)
             return 1
 
-    mode = "id-lora" if id_lora else ("lip-sync" if lipsync else ("image-to-video" if uploaded_image else "text-to-video"))
-    if not id_lora and not lipsync and uploaded_end_image:
-        mode += " (start+end)"
-    if uploaded_audio:
-        mode += " + audio"
+    if is_h3:
+        if uploaded_reference_images:
+            mode = f"MiniMax H3 reference-to-video ({len(uploaded_reference_images)} images)"
+        elif uploaded_image or uploaded_end_image:
+            anchors = "+".join(
+                name for name, present in (("first", uploaded_image), ("last", uploaded_end_image)) if present
+            )
+            mode = f"MiniMax H3 image-to-video ({anchors})"
+        else:
+            mode = "MiniMax H3 text-to-video"
+    else:
+        mode = "id-lora" if id_lora else ("lip-sync" if lipsync else ("image-to-video" if uploaded_image else "text-to-video"))
+        if not id_lora and not lipsync and uploaded_end_image:
+            mode += " (start+end)"
+        if uploaded_audio:
+            mode += " + audio"
     print(f"Mode: {mode} | {width}x{height} @ {args.fps}fps | {duration:.1f}s ({frames} frames)")
     # Resolve negative prompt (ID-LoRA template uses a different baseline).
     base_negative = IDLORA_NEGATIVE_PROMPT if id_lora else NEGATIVE_PROMPT
@@ -2065,6 +2348,7 @@ def main() -> int:
         err = generate_video(
             broker_url=broker_url,
             timeout_seconds=timeout_seconds,
+            engine=args.engine,
             prompt=args.prompt,
             output_path=current_output,
             width=width,
@@ -2079,6 +2363,8 @@ def main() -> int:
             lipsync=lipsync,
             id_lora=id_lora,
             reference_audio=uploaded_reference_audio,
+            reference_images=uploaded_reference_images,
+            ref_image_size=args.ref_image_size,
             identity_guidance_scale=args.identity_guidance_scale,
             original_audio_path=audio_path if lipsync else None,
             negative_prompt=neg_prompt,

@@ -4,10 +4,10 @@ set -euo pipefail
 # ==================================================
 # Hermes Desktop Backend Startup Script (WSL)
 # ==================================================
-# Runs `hermes serve` -- the JSON-RPC/WebSocket API the Windows/macOS Desktop
-# app connects to as a "Remote Gateway" -- as its own supervised process in
-# its own tab, with the same crash-restart semantics as the messaging
-# gateway (start-hermes-wsl.sh).
+# Runs `hermes dashboard` -- the web dashboard with embedded chat WebSocket
+# that the Windows/macOS Desktop app connects to as a "Remote Gateway" -- as
+# its own supervised process in its own tab, with the same crash-restart
+# semantics as the messaging gateway (start-hermes-wsl.sh).
 #
 # Why its own tab instead of a background helper bolted onto the gateway
 # script: the Desktop app's own "update" flow can kill this process
@@ -17,6 +17,10 @@ set -euo pipefail
 # every N seconds from an unrelated script.
 
 export PATH="$HOME/.local/bin:$PATH"
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/scripts/load-copilot-work-account.sh"
 
 DESKTOP_SERVE_PORT="${DESKTOP_SERVE_PORT:-9119}"
 CLEANUP_DONE=0
@@ -42,7 +46,7 @@ resolve_hermes_runtime() {
 }
 
 kill_stale_backend() {
-  pkill -f "hermes serve --host 0.0.0.0 --port ${DESKTOP_SERVE_PORT}" 2>/dev/null || true
+  pkill -f "hermes dashboard --host 0.0.0.0 --port ${DESKTOP_SERVE_PORT}" 2>/dev/null || true
 }
 
 cleanup() {
@@ -66,7 +70,7 @@ echo ""
 
 resolve_hermes_runtime
 
-# Load ~/.hermes/.env so HERMES_DASHBOARD_BASIC_AUTH_* reach `hermes serve`.
+# Load ~/.hermes/.env so HERMES_DASHBOARD_SESSION_TOKEN reaches `hermes dashboard`.
 if [[ -f "$HOME/.hermes/.env" ]]; then
   set -a
   # Disable -u while sourcing: dotenv values can contain a literal $ (e.g. a
@@ -80,14 +84,15 @@ if [[ -f "$HOME/.hermes/.env" ]]; then
   set +a
 fi
 
-if [[ -z "${HERMES_DASHBOARD_BASIC_AUTH_USERNAME:-}" ]]; then
-  echo "[!] Falta HERMES_DASHBOARD_BASIC_AUTH_USERNAME en ~/.hermes/.env"
-fi
-if [[ -z "${HERMES_DASHBOARD_BASIC_AUTH_PASSWORD_HASH:-}" && -z "${HERMES_DASHBOARD_BASIC_AUTH_PASSWORD:-}" ]]; then
-  echo "[!] Falta HERMES_DASHBOARD_BASIC_AUTH_PASSWORD_HASH o HERMES_DASHBOARD_BASIC_AUTH_PASSWORD en ~/.hermes/.env"
-fi
-if [[ -z "${HERMES_DASHBOARD_BASIC_AUTH_SECRET:-}" ]]; then
-  echo "[!] Falta HERMES_DASHBOARD_BASIC_AUTH_SECRET en ~/.hermes/.env; las sesiones se cerraran al reiniciar"
+load_copilot_work_account
+
+# Session token para conexiones remotas (Desktop app Windows/Mac via Tailscale).
+# Si no está fijado, se genera uno y se persiste en .env.
+if [[ -z "${HERMES_DASHBOARD_SESSION_TOKEN:-}" ]]; then
+  echo "[hermes] Generando HERMES_DASHBOARD_SESSION_TOKEN y persistiendo en .env..."
+  export HERMES_DASHBOARD_SESSION_TOKEN="$(openssl rand -base64 32)"
+  echo "HERMES_DASHBOARD_SESSION_TOKEN=${HERMES_DASHBOARD_SESSION_TOKEN}" >> "$HOME/.hermes/.env"
+  echo "[hermes] Token: ${HERMES_DASHBOARD_SESSION_TOKEN}"
 fi
 
 echo ""
@@ -112,7 +117,7 @@ while true; do
   LAST_START=$(date +%s)
 
   exit_code=0
-  "${HERMES_BIN}" serve --host 0.0.0.0 --port "${DESKTOP_SERVE_PORT}" || exit_code=$?
+  "${HERMES_BIN}" dashboard --host 0.0.0.0 --port "${DESKTOP_SERVE_PORT}" --insecure --no-open --skip-build || exit_code=$?
 
   if [[ ${exit_code} -eq 0 ]]; then
     echo "[hermes] Desktop backend termino limpiamente (exit code 0)."

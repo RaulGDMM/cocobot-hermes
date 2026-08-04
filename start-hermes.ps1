@@ -6,8 +6,8 @@
 # MTP tampoco funciona con multimodal. Volver a ik_llama cuando ambos problemas esten resueltos.
 $useLlamaInstall = "stable"
 
-# Modelo LLM: "qwen36_27b_bee_q5", "qwen36_27b_bee_q6", "qwen36_27b", "qwen36_27b_q6", "qwen36_27b_q4_mtp", "qwen36_27b_q5_mtp", "qwen36_27b_q6_mtp", "qwen36_27b_autoround_q6_mtp", "qwen36_27b_nvfp4", "qwen36_27b_nvfp4_1f", "qwen36", "qwen36q4", "qwen35", "gemma4"
-$useModel = "qwen36_27b_autoround_q6_mtp"
+# Modelo LLM: "qwen36_27b_bee_q5", "qwen36_27b_bee_q6", "qwen36_27b", "qwen36_27b_q6", "qwen36_27b_q4_mtp", "qwen36_27b_q5_mtp", "qwen36_27b_q6_mtp", "qwen36_27b_autoround_q6_mtp", "qwen36_27b_bartowski_q6kl_mtp", "qwen36", "qwen36q4", "qwen35", "gemma4"
+$useModel = "qwen36_27b_bartowski_q6kl_mtp"
 
 # Herramienta browser: $true para activarla, $false para desactivarla
 $useBrowserTool = $true
@@ -170,16 +170,12 @@ if ($useModel -eq "qwen36") {
     $ctxSize       = "170000"
 } elseif ($useModel -eq "qwen36_27b_autoround_q6_mtp") {
     $modelLabel    = "Qwen3.6-27B-AutoRound-Q6_K MTP"
-    $modelSize     = "21 GB + MTP/NextN heads, vision+thinking, dense 27B, Intel AutoRound Q6_K (sphaela, virtually indistinguishable from F16), KV K Q8_0 / V Q5_1 + draft KV F16, ctx 160k, encoder en GPU"
-    $ctxSize       = "160000"
-} elseif ($useModel -eq "qwen36_27b_nvfp4") {
-    $modelLabel    = "Qwen3.6-27B-NVFP4-Q8_0 MTP"
-    $modelSize     = "18.7 GB trunk + 1.9 GB MTP draft Q4_K_M, vision+thinking, dense 27B, FFN NVFP4 + attn/SSM Q8_0, KV K Q5_1 / V Q4_0, ctx 175k"
-    $ctxSize       = "175000"
-} elseif ($useModel -eq "qwen36_27b_nvfp4_1f") {
-    $modelLabel    = "Qwen3.6-27B-NVFP4-MTP (one-file)"
-    $modelSize     = "15.5 GB single gguf con MTP/NextN embebido (sin draft externo), dense 27B, NVFP4 (michaelw9999, imatrix wikitrain), KV K Q8_0 / V Q5_1, ctx 230k"
-    $ctxSize       = "230000"
+    $modelSize     = "21 GB + MTP/NextN heads, vision+thinking, dense 27B, Intel AutoRound Q6_K (sphaela, virtually indistinguishable from F16), KV K Q8_0 / V Q5_1 + draft KV F16, ctx 150k, encoder en GPU"
+    $ctxSize       = "150000"
+} elseif ($useModel -eq "qwen36_27b_bartowski_q6kl_mtp") {
+    $modelLabel    = "Qwen3.6-27B Bartowski Q6_K_L MTP"
+    $modelSize     = "22.6 GiB, MTP/NextN integrado Q8_0, vision+thinking, KV K Q8_0 / V Q5_1 + draft KV F16, ctx 115k"
+    $ctxSize       = "115000"
 } elseif ($useModel -eq "gemma4") {
     $modelLabel    = "Gemma 4 31B-it UD-Q4_K_XL"
     $modelSize     = "17.5 GB, vision+thinking"
@@ -196,7 +192,7 @@ $env:OPENCLAW_LLAMA_TOP_P = "0.95"
 $env:OPENCLAW_LLAMA_TOP_K = "20"
 $env:OPENCLAW_LLAMA_MIN_P = "0"
 $env:OPENCLAW_LLAMA_PREDICT = "81920"
-if ($useModel -in @("qwen36_27b_bee_q5","qwen36_27b_bee_q6","qwen36_27b","qwen36_27b_q6","qwen36_27b_q4_mtp","qwen36_27b_q5_mtp","qwen36_27b_q6_mtp","qwen36_27b_autoround_q6_mtp","qwen36_27b_nvfp4","qwen36_27b_nvfp4_1f")) {
+if ($useModel -in @("qwen36_27b_bee_q5","qwen36_27b_bee_q6","qwen36_27b","qwen36_27b_q6","qwen36_27b_q4_mtp","qwen36_27b_q5_mtp","qwen36_27b_q6_mtp","qwen36_27b_autoround_q6_mtp","qwen36_27b_bartowski_q6kl_mtp")) {
     $env:OPENCLAW_LLAMA_PRESENCE_PENALTY = "0"
 } else {
     $env:OPENCLAW_LLAMA_PRESENCE_PENALTY = "1.5"
@@ -205,8 +201,9 @@ if ($useModel -in @("qwen36_27b_bee_q5","qwen36_27b_bee_q6","qwen36_27b","qwen36
 # MTP (Multi-Token Prediction) — upstream llama.cpp mainline uses --spec-type draft-mtp.
 # Requires a GGUF that includes MTP/NextN heads. Keep this isolated in qwen36_27b_*_mtp
 # so BeeLlama/DFlash remains one edit away if MTP is not stable enough for Hermes.
-$env:OPENCLAW_LLAMA_MTP_ENABLED = if ($useModel -in @("qwen36_27b_q4_mtp","qwen36_27b_q5_mtp","qwen36_27b_q6_mtp","qwen36_27b_autoround_q6_mtp","qwen36_27b_nvfp4","qwen36_27b_nvfp4_1f")) { "1" } else { "0" }
-$env:OPENCLAW_LLAMA_MTP_DRAFT_N_MAX = "3"
+$env:OPENCLAW_LLAMA_MTP_ENABLED = if ($useModel -in @("qwen36_27b_q4_mtp","qwen36_27b_q5_mtp","qwen36_27b_q6_mtp","qwen36_27b_autoround_q6_mtp","qwen36_27b_bartowski_q6kl_mtp")) { "1" } else { "0" }
+$env:OPENCLAW_LLAMA_MTP_DRAFT_N_MAX = "2"
+$env:OPENCLAW_LLAMA_MTP_DRAFT_P_MIN = "0"
 
 Write-Host "[1/6] Comprobando llama-server ($modelLabel)..." -ForegroundColor Yellow
 
@@ -250,14 +247,9 @@ if ($useModel -eq "qwen36") {
 } elseif ($useModel -eq "qwen36_27b_autoround_q6_mtp") {
     $modelFile    = Join-Path $openclawRoot "models\qwen36-27b\Qwen3.6-27B-AutoRound-Q6_K.gguf"
     $mmProjFile   = Join-Path $openclawRoot "models\qwen36-27b\mmproj-BF16.gguf"
-} elseif ($useModel -eq "qwen36_27b_nvfp4") {
-    $modelFile    = Join-Path $openclawRoot "models\qwen36-27b\Qwen3.6-27B-NVFP4-Q8_0-mtp.gguf"
-    $mmProjFile   = Join-Path $openclawRoot "models\qwen36-27b\mmproj-Qwen3.6-27B-F16.gguf"
-    $draftModelFile = Join-Path $openclawRoot "models\qwen36-27b\mtp-Qwen3.6-27B-NVFP4-Q4_K_M.gguf"
-} elseif ($useModel -eq "qwen36_27b_nvfp4_1f") {
-    # gguf unico: las cabezas MTP/NextN van embebidas, no hay draft externo (--spec-type draft-mtp como los perfiles *_mtp)
-    $modelFile    = Join-Path $openclawRoot "models\qwen36-27b\Qwen3.6-27B-NVFP4-MTP-GGUF.gguf"
-    $mmProjFile   = Join-Path $openclawRoot "models\qwen36-27b\mmproj-Qwen3.6-27B-F16.gguf"
+} elseif ($useModel -eq "qwen36_27b_bartowski_q6kl_mtp") {
+    $modelFile    = Join-Path $openclawRoot "models\qwen36-27b\Qwen_Qwen3.6-27B-Q6_K_L.gguf"
+    $mmProjFile   = Join-Path $openclawRoot "models\qwen36-27b\mmproj-BF16.gguf"
 } elseif ($useModel -eq "gemma4") {
     $modelFile    = Join-Path $openclawRoot "models\gemma4-31b\gemma-4-31B-it-UD-Q4_K_XL.gguf"
     $mmProjFile   = Join-Path $openclawRoot "models\gemma4-31b\mmproj-BF16.gguf"
@@ -275,9 +267,6 @@ elseif (-not (Test-Path $modelFile)) {
 }
 elseif ($useModel -in @("qwen36_27b_bee_q5","qwen36_27b_bee_q6") -and -not (Test-Path $draftModelFile)) {
     Write-Host "[!] No se encuentra el draft DFlash GGUF en $draftModelFile" -ForegroundColor Red
-}
-elseif ($useModel -eq "qwen36_27b_nvfp4" -and $env:OPENCLAW_LLAMA_MTP_ENABLED -eq "1" -and -not (Test-Path $draftModelFile)) {
-    Write-Host "[!] No se encuentra el draft MTP GGUF en $draftModelFile" -ForegroundColor Red
 }
 else {
     $llamaRunning = $false
@@ -310,9 +299,9 @@ else {
             "--log-file",            $llamaLogFile
         )
         # Model-specific flags
-        if ($useModel -in @("qwen36","qwen36q4","qwen36_27b_bee_q5","qwen36_27b_bee_q6","qwen36_27b","qwen36_27b_q6","qwen36_27b_q4_mtp","qwen36_27b_q5_mtp","qwen36_27b_q6_mtp","qwen36_27b_autoround_q6_mtp","qwen36_27b_nvfp4","qwen36_27b_nvfp4_1f")) {
+        if ($useModel -in @("qwen36","qwen36q4","qwen36_27b_bee_q5","qwen36_27b_bee_q6","qwen36_27b","qwen36_27b_q6","qwen36_27b_q4_mtp","qwen36_27b_q5_mtp","qwen36_27b_q6_mtp","qwen36_27b_autoround_q6_mtp","qwen36_27b_bartowski_q6kl_mtp")) {
             $chatTemplateFile = Join-Path $openclawRoot "models\qwen36-27b\qwen3.6-enhanced.jinja"
-            $ubatchSize = if ($useModel -in @("qwen36_27b_q6_mtp","qwen36_27b_autoround_q6_mtp","qwen36_27b_nvfp4","qwen36_27b_nvfp4_1f")) { "1024" } else { "2048" }
+            $ubatchSize = if ($useModel -in @("qwen36_27b_q6_mtp","qwen36_27b_autoround_q6_mtp","qwen36_27b_bartowski_q6kl_mtp")) { "1024" } else { "2048" }
             $llamaArgs += @("--ubatch-size", $ubatchSize)
             $llamaArgs += @("--jinja")
             $llamaArgs += @("--chat-template-file", $chatTemplateFile)
@@ -332,8 +321,6 @@ else {
             $useMtp = ($env:OPENCLAW_LLAMA_MTP_ENABLED -eq "1")
             if ($useModel -in @("qwen36_27b_bee_q5","qwen36_27b_bee_q6")) {
                 $llamaArgs += @("--parallel", "1")
-            } elseif ($useModel -in @("qwen36_27b_nvfp4","qwen36_27b_nvfp4_1f")) {
-                $llamaArgs += @("--parallel", "1")
             } elseif ($useMtp) {
                 $llamaArgs += @("--parallel", "1")
             } else {
@@ -346,10 +333,12 @@ else {
             } elseif ($useModel -in @("qwen36_27b_bee_q5","qwen36_27b_bee_q6")) {
                 $llamaArgs += @("--kv-unified", "--ctx-checkpoints", "32", "--checkpoint-min-step", "8192", "--cache-ram", "32768", "--no-context-shift", "--no-cache-idle-slots")
             } elseif ($useMtp) {
-                # Mainline MTP: densify checkpoints (default ~8k waste on divergence -> 1k).
-                # --cache-ram lets older checkpoints spill to system RAM so we can keep 32 of them.
+                # Mainline MTP: keep checkpoints dense enough for rollback while retaining
+                # a broader span of long agentic histories within the 32-checkpoint limit.
+                # --cache-ram bounds the secondary prompt cache; live slot checkpoints use process RAM.
                 # --kv-unified is mainline-only and compatible with MTP (single shared KV pool).
-                $llamaArgs += @("--kv-unified", "--ctx-checkpoints", "32", "--checkpoint-min-step", "1024", "--cache-ram", "16384", "--no-context-shift")
+                $promptCacheRam = if ($useModel -in @("qwen36_27b_autoround_q6_mtp","qwen36_27b_bartowski_q6kl_mtp")) { "32768" } else { "16384" }
+                $llamaArgs += @("--kv-unified", "--ctx-checkpoints", "32", "--checkpoint-min-step", "2048", "--cache-ram", $promptCacheRam, "--no-context-shift")
             } else {
                 $llamaArgs += @("--kv-unified", "--ctx-checkpoints", "32", "--checkpoint-min-step", "1024", "--cache-ram", "16384", "--no-context-shift")
             }
@@ -370,25 +359,25 @@ else {
                     $llamaLaunchEnv[$kv.Key] = $kv.Value
                 }
                 Write-Host "  BeeLlama DFlash activado (draft Q4_K_M, KV turbo4/turbo3_tcq, parallel=1, logs resumen)" -ForegroundColor Cyan
-            } elseif ($useModel -in @("qwen36_27b","qwen36_27b_q6","qwen36_27b_q4_mtp","qwen36_27b_q5_mtp","qwen36_27b_q6_mtp","qwen36_27b_autoround_q6_mtp","qwen36_27b_nvfp4","qwen36_27b_nvfp4_1f")) {
+            } elseif ($useModel -in @("qwen36_27b","qwen36_27b_q6","qwen36_27b_q4_mtp","qwen36_27b_q5_mtp","qwen36_27b_q6_mtp","qwen36_27b_autoround_q6_mtp","qwen36_27b_bartowski_q6kl_mtp")) {
                 if ($useLlamaInstall -eq "ik_llama" -and $useModel -eq "qwen36_27b_q6") {
                     # Q6_0 KV cache (ik_llama exclusive low-perp variant) — leaves headroom for MTP draft
                     $llamaArgs += @("-ctk", "q6_0", "-ctv", "q6_0")
                 } elseif ($useModel -in @("qwen36_27b_q4_mtp","qwen36_27b_q5_mtp")) {
                     $llamaArgs += @("-ctk", "q8_0", "-ctv", "q8_0")
-                } elseif ($useModel -in @("qwen36_27b_nvfp4_1f","qwen36_27b_autoround_q6_mtp")) {
+                } elseif ($useModel -in @("qwen36_27b_autoround_q6_mtp","qwen36_27b_bartowski_q6kl_mtp")) {
                     # AutoRound pesa ~1.9 GB menos -> usamos ese margen para subir el KV a
-                    # K q8_0 / V q5_1 (mejor recall fino) con ctx 160k. nvfp4_1f comparte la misma config.
+                    # K q8_0 / V q5_1 (mejor recall fino).
                     $llamaArgs += @("-ctk", "q8_0", "-ctv", "q5_1")
-                } elseif ($useModel -in @("qwen36_27b_q6_mtp","qwen36_27b_nvfp4")) {
+                } elseif ($useModel -eq "qwen36_27b_q6_mtp") {
                     # K/V invertidos vs q4_0/q5_1: mismos bytes pero la mayor precision (q5_1) va a K, que es mas sensible
                     $llamaArgs += @("-ctk", "q5_1", "-ctv", "q4_0")
                 } else {
                     $llamaArgs += @("-ctk", "q8_0", "-ctv", "q8_0")
                 }
             }
-            # q6_mtp y nvfp4_1f dejan VRAM de sobra: el encoder de vision va a GPU (sin --no-mmproj-offload)
-            if ($useModel -in @("qwen36_27b_q6","qwen36_27b_q4_mtp","qwen36_27b_q5_mtp","qwen36_27b_nvfp4") -and $useLlamaInstall -ne "ik_llama") {
+            # Estos perfiles mantienen el encoder de vision en CPU para reservar VRAM al KV.
+            if ($useModel -in @("qwen36_27b_q6","qwen36_27b_q4_mtp","qwen36_27b_q5_mtp") -and $useLlamaInstall -ne "ik_llama") {
                 # --no-mmproj-offload doesn't exist in ik_llama
                 $llamaArgs += @("--no-mmproj-offload")
             }
@@ -398,13 +387,13 @@ else {
                     $llamaArgs += @("-mtp", "--draft-max", $env:OPENCLAW_LLAMA_MTP_DRAFT_N_MAX)
                     Write-Host "  MTP activado (-mtp --draft-max $($env:OPENCLAW_LLAMA_MTP_DRAFT_N_MAX))" -ForegroundColor Cyan
                 } else {
-                    if ($useModel -eq "qwen36_27b_nvfp4" -and $draftModelFile -and (Test-Path $draftModelFile)) {
-                        $llamaArgs += @("--model-draft", $draftModelFile, "-ngld", "all", "--spec-draft-p-min", "0.3")
-                    }
                     $llamaArgs += @("--spec-type", "draft-mtp", "--spec-draft-n-max", $env:OPENCLAW_LLAMA_MTP_DRAFT_N_MAX)
+                    if ($env:OPENCLAW_LLAMA_MTP_DRAFT_P_MIN -ne "0") {
+                        $llamaArgs += @("--spec-draft-p-min", $env:OPENCLAW_LLAMA_MTP_DRAFT_P_MIN)
+                    }
                     $llamaArgs += @("--cache-type-k-draft", "f16", "--cache-type-v-draft", "f16")
                     $llamaArgs += @("--spec-default")
-                    Write-Host "  MTP activado (--spec-type draft-mtp --spec-draft-n-max $($env:OPENCLAW_LLAMA_MTP_DRAFT_N_MAX), draft KV F16 + --spec-default ngram-mod)" -ForegroundColor Cyan
+                    Write-Host "  MTP activado (--spec-type draft-mtp --spec-draft-n-max $($env:OPENCLAW_LLAMA_MTP_DRAFT_N_MAX), p-min $($env:OPENCLAW_LLAMA_MTP_DRAFT_P_MIN), draft KV F16 + --spec-default ngram-mod)" -ForegroundColor Cyan
                 }
             }
         }
@@ -588,12 +577,20 @@ $brokerWindowScript = Find-Script "start-comfyui-broker-window.ps1"
 $brokerPython = "C:\ComfyUI\.venv\Scripts\python.exe"
 $brokerLogFile = Join-Path $PSScriptRoot "comfyui-broker.log"
 $brokerModelPathsConfig = Find-Script "comfyui-extra-model-paths.yaml"
+$expectedBrokerComfyAppDir = "E:\Comfy-Desktop\ComfyUI-Installs\ComfyUI\ComfyUI"
 
 if ($brokerScript) {
     $brokerRunning = $false
+    $brokerHealth = $null
     try {
-        $null = Invoke-RestMethod -Uri "http://localhost:${brokerPort}/health" -Method Get -TimeoutSec 2 -ErrorAction Stop
-        $brokerRunning = $true
+        $brokerHealth = Invoke-RestMethod -Uri "http://localhost:${brokerPort}/health" -Method Get -TimeoutSec 2 -ErrorAction Stop
+        $brokerRunning = (
+            $brokerHealth.llama_profile -eq $useModel -and
+            $brokerHealth.comfy_app_dir -eq $expectedBrokerComfyAppDir
+        )
+        if (-not $brokerRunning) {
+            Write-Host "  Broker desactualizado: perfil=$($brokerHealth.llama_profile), ComfyUI=$($brokerHealth.comfy_app_dir)" -ForegroundColor Yellow
+        }
     } catch {}
 
     if ($brokerRunning) {
@@ -630,7 +627,7 @@ if ($brokerScript) {
             $env:OPENCLAW_COMFYUI_INPUT_DIR = "C:\ComfyUI\input"
             $env:OPENCLAW_COMFYUI_OUTPUT_DIR = "C:\ComfyUI\output"
             $env:OPENCLAW_COMFYUI_PYTHON = "C:\ComfyUI\.venv\Scripts\python.exe"
-            $env:OPENCLAW_COMFYUI_APP_DIR = "E:\Programs\ComfyUI\resources\ComfyUI"
+            $env:OPENCLAW_COMFYUI_APP_DIR = $expectedBrokerComfyAppDir
             if ($brokerModelPathsConfig -and (Test-Path $brokerModelPathsConfig)) { $env:OPENCLAW_COMFYUI_EXTRA_MODEL_PATHS_CONFIG = $brokerModelPathsConfig }
             $env:OPENCLAW_COMFYUI_HOST = "127.0.0.1"
             $env:OPENCLAW_COMFYUI_PORT = "8000"
@@ -645,12 +642,12 @@ if ($brokerScript) {
             if ($llamaLogFile) { $env:OPENCLAW_LLAMA_LOG_FILE = $llamaLogFile }
             $env:OPENCLAW_LLAMA_PORT = [string]$llamaPort
             $env:OPENCLAW_LLAMA_CTX_SIZE = $ctxSize
-            $env:OPENCLAW_LLAMA_PARALLEL = if ($useModel -in @("qwen36_27b_bee_q5","qwen36_27b_bee_q6","qwen36_27b_q4_mtp","qwen36_27b_q5_mtp","qwen36_27b_q6_mtp","qwen36_27b_autoround_q6_mtp","qwen36_27b_nvfp4","qwen36_27b_nvfp4_1f")) { "1" } else { "2" }
+            $env:OPENCLAW_LLAMA_PARALLEL = if ($useModel -in @("qwen36_27b_bee_q5","qwen36_27b_bee_q6","qwen36_27b_q4_mtp","qwen36_27b_q5_mtp","qwen36_27b_q6_mtp","qwen36_27b_autoround_q6_mtp","qwen36_27b_bartowski_q6kl_mtp")) { "1" } else { "2" }
             $env:OPENCLAW_LLAMA_N_GPU_LAYERS = "99"
             $env:OPENCLAW_LLAMA_BATCH_SIZE = "2048"
             $env:OPENCLAW_LLAMA_PROFILE = $useModel
-            if ($useModel -in @("qwen36","qwen36q4","qwen36_27b_bee_q5","qwen36_27b_bee_q6","qwen36_27b","qwen36_27b_q6","qwen36_27b_q4_mtp","qwen36_27b_q5_mtp","qwen36_27b_q6_mtp","qwen36_27b_autoround_q6_mtp","qwen36_27b_nvfp4","qwen36_27b_nvfp4_1f")) {
-                $env:OPENCLAW_LLAMA_UBATCH_SIZE = if ($useModel -in @("qwen36_27b_q6_mtp","qwen36_27b_autoround_q6_mtp","qwen36_27b_nvfp4","qwen36_27b_nvfp4_1f")) { "1024" } else { "2048" }
+            if ($useModel -in @("qwen36","qwen36q4","qwen36_27b_bee_q5","qwen36_27b_bee_q6","qwen36_27b","qwen36_27b_q6","qwen36_27b_q4_mtp","qwen36_27b_q5_mtp","qwen36_27b_q6_mtp","qwen36_27b_autoround_q6_mtp","qwen36_27b_bartowski_q6kl_mtp")) {
+                $env:OPENCLAW_LLAMA_UBATCH_SIZE = if ($useModel -in @("qwen36_27b_q6_mtp","qwen36_27b_autoround_q6_mtp","qwen36_27b_bartowski_q6kl_mtp")) { "1024" } else { "2048" }
                 $env:OPENCLAW_LLAMA_CTX_CHECKPOINTS = "32"
                 $env:OPENCLAW_LLAMA_CHAT_TEMPLATE = Join-Path $openclawRoot "models\qwen36-27b\qwen3.6-enhanced.jinja"
             } elseif ($useModel -eq "qwen35") {

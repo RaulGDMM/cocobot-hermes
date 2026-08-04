@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  echo "Uso: git-account <personal|work>"
+  echo "Configura identidad y credenciales solo para el repositorio actual."
+}
+
+if [[ $# -ne 1 ]]; then
+  usage
+  exit 2
+fi
+
+repo_root="$(git rev-parse --show-toplevel 2>/dev/null)" || {
+  echo "[!] Ejecuta git-account dentro de un repositorio Git."
+  exit 1
+}
+
+case "$1" in
+  personal)
+    account_name="RaulGDMM"
+    account_email="RaulGDMM@users.noreply.github.com"
+    gh_config_dir="$HOME/.config/gh-personal"
+    ;;
+  work)
+    account_name="rgarciademarina"
+    account_email="raulgmm@ext.inditex.com"
+    gh_config_dir="$HOME/.config/gh-work"
+    ;;
+  *)
+    usage
+    exit 2
+    ;;
+esac
+
+if ! GH_CONFIG_DIR="$gh_config_dir" gh auth status --hostname github.com >/dev/null 2>&1; then
+  echo "[!] La cuenta '$1' no esta autenticada en $gh_config_dir."
+  echo "    Ejecuta: GH_CONFIG_DIR=$gh_config_dir gh auth login --hostname github.com --git-protocol https --web"
+  exit 1
+fi
+
+git -C "$repo_root" config --local user.name "$account_name"
+git -C "$repo_root" config --local user.email "$account_email"
+git -C "$repo_root" config --local --unset-all credential.helper 2>/dev/null || true
+git -C "$repo_root" config --local --add credential.helper ""
+git -C "$repo_root" config --local --add credential.helper "!GH_CONFIG_DIR=$gh_config_dir /usr/bin/gh auth git-credential"
+git -C "$repo_root" config --local github.account "$1"
+
+echo "[OK] Repositorio: $repo_root"
+echo "     Cuenta:      $1"
+echo "     Commit:      $account_name <$account_email>"
+echo "     Push HTTPS:  credencial aislada en $gh_config_dir"

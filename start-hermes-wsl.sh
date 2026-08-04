@@ -16,6 +16,8 @@ LLAMA_PORT=30000
 # Resolve Windows host IP (WSL gateway) — replaces old host.docker.internal
 LLAMA_HOST="$(ip route show default | awk '{print $3}')"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/scripts/load-copilot-work-account.sh"
 CLEANUP_DONE=0
 HERMES_BIN=""
 TAILSCALE_STARTED=0
@@ -88,7 +90,7 @@ cleanup() {
   # Exit 0 so Windows Terminal auto-closes the tab
   exit 0
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT HUP INT TERM
 
 # ---- Main ----
 echo "========================================"
@@ -119,9 +121,7 @@ case "${USE_MODEL}" in
   qwen36_27b_q4_mtp) CTX_LEN=150000 ;;
   qwen36_27b_q5_mtp) CTX_LEN=130000 ;;
   qwen36_27b_q6_mtp) CTX_LEN=170000 ;;
-  qwen36_27b_autoround_q6_mtp) CTX_LEN=160000 ;;
-  qwen36_27b_nvfp4) CTX_LEN=175000 ;;
-  qwen36_27b_nvfp4_1f) CTX_LEN=230000 ;;
+  qwen36_27b_autoround_q6_mtp) CTX_LEN=150000 ;;
   gemma4)          CTX_LEN=100000 ;;
   *)               CTX_LEN=131072 ;;
 esac
@@ -160,6 +160,7 @@ if [[ -f "$HOME/.hermes/.env" ]]; then
   set -u
   set +a
 fi
+load_copilot_work_account
 if [[ -n "${BRAVE_SEARCH_API_KEY:-}" ]]; then
   echo "[web] Brave Search: BRAVE_SEARCH_API_KEY cargada"
 else
@@ -239,11 +240,11 @@ fi
 # Sin flag = modo display box (poco informativo)
 GATEWAY_VERBOSE="${GATEWAY_VERBOSE:-vv}"  # vv=DEBUG, v=INFO, vacío=silencioso
 
-# Restart loop mimics systemd Restart=on-failure:
-#   - exit 0   → clean shutdown, don't restart
+# Restart loop keeps the gateway in this tab across planned reloads:
+#   - exit 0   → planned clean stop/reload, restart
 #   - exit 75  → explicit restart request (hermes gateway restart)
 #   - exit 1+  → failure or external stop (hermes gateway stop), restart it
-#   - SIGINT/SIGTERM from user Ctrl+C → handled by trap, script exits before loop continues
+#   - SIGHUP/SIGINT/SIGTERM to this launcher → handled by trap, don't restart
 # Rapid-crash protection: if gateway crashes 5 times within 30s, stop looping.
 CRASH_COUNT=0
 MAX_RAPID_CRASHES=5
@@ -261,13 +262,7 @@ while true; do
     "${HERMES_BIN}" gateway || exit_code=$?
   fi
 
-  # Clean exit → stop
-  if [[ ${exit_code} -eq 0 ]]; then
-    echo "[hermes] Gateway terminó limpiamente (exit code 0)."
-    break
-  fi
-
-  # Rapid-crash detection: if it ran less than RAPID_CRASH_WINDOW seconds, count it
+  # Rapid-restart detection also covers repeated clean reloads.
   now=$(date +%s)
   runtime=$(( now - LAST_START ))
   if (( runtime < RAPID_CRASH_WINDOW )); then
@@ -281,8 +276,10 @@ while true; do
     break
   fi
 
-  # Any non-zero exit: restart (code 75 = explicit, code 1 = external stop / systemd-style)
-  if [[ ${exit_code} -eq 75 ]]; then
+  if [[ ${exit_code} -eq 0 ]]; then
+    echo ""
+    echo "[hermes] Gateway terminó limpiamente para recargar (exit code 0). Reiniciando en 2s..."
+  elif [[ ${exit_code} -eq 75 ]]; then
     echo ""
     echo "[hermes] Gateway solicitó reinicio (exit code 75). Reiniciando en 2s..."
   else
@@ -294,7 +291,7 @@ while true; do
   kill_stale_gateway
   rm -f ~/.hermes/gateway.pid 2>/dev/null || true
 
-  if [[ ${exit_code} -eq 75 ]]; then
+  if [[ ${exit_code} -eq 0 || ${exit_code} -eq 75 ]]; then
     sleep 2
   else
     sleep 3

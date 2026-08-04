@@ -47,3 +47,16 @@ desktop.ini
 *.mp4
 *.webm
 output/
+
+# Local Hermes session files and credentials
+.hermes/
+
+# Internal work QA evidence (this repository is public)
+evidencias-pr*/
+PR-*-impacto-y-plan-de-pruebas.md
+PR-*-informe-ejecucion-pruebas.md
+
+# Generated HyperFrames previews and caches
+hyperframes-promo/.thumbnails/
+hyperframes-promo/.waveform-cache/
+hyperframes-promo/frame_preview.jpg

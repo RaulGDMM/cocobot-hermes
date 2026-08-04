@@ -1,0 +1,445 @@
+<!DOCTYPE html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=1920, height=1080">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700;800;900&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+    <style>
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      html, body {
+        margin: 0;
+        width: 1920px;
+        height: 1080px;
+        overflow: hidden;
+        background: #050508;
+        font-family: 'Inter', sans-serif;
+      }
+      code, pre, .mono { font-family: 'JetBrains Mono', monospace; }
+      .clip { visibility: hidden; }
+
+      /* Background grid */
+      .bg-grid {
+        position: absolute;
+        inset: 0;
+        background-image:
+          linear-gradient(rgba(255,255,255,0.03) 1px, transparent 1px),
+          linear-gradient(90deg, rgba(255,255,255,0.03) 1px, transparent 1px);
+        background-size: 60px 60px;
+        z-index: 0;
+      }
+
+      /* Ambient glow */
+      .glow {
+        position: absolute;
+        border-radius: 50%;
+        filter: blur(120px);
+        z-index: 0;
+      }
+      .glow-1 {
+        width: 600px; height: 600px;
+        background: rgba(99, 102, 241, 0.15);
+        top: -100px; right: -100px;
+      }
+      .glow-2 {
+        width: 500px; height: 500px;
+        background: rgba(168, 85, 247, 0.1);
+        bottom: -100px; left: -100px;
+      }
+      .glow-3 {
+        width: 400px; height: 400px;
+        background: rgba(59, 130, 246, 0.1);
+        top: 50%; left: 50%;
+        transform: translate(-50%, -50%);
+      }
+
+      /* Scan line effect */
+      .scanline {
+        position: absolute;
+        inset: 0;
+        background: repeating-linear-gradient(
+          0deg,
+          transparent,
+          transparent 2px,
+          rgba(0,0,0,0.03) 2px,
+          rgba(0,0,0,0.03) 4px
+        );
+        z-index: 100;
+        pointer-events: none;
+      }
+
+      /* Title */
+      .title-main {
+        font-size: 120px;
+        font-weight: 900;
+        letter-spacing: -4px;
+        background: linear-gradient(135deg, #fff 0%, #a5b4fc 50%, #818cf8 100%);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        background-clip: text;
+        text-align: center;
+        position: absolute;
+        top: 50%; left: 50%;
+        transform: translate(-50%, -50%);
+        z-index: 10;
+      }
+
+      .title-sub {
+        font-size: 36px;
+        font-weight: 300;
+        color: rgba(255,255,255,0.5);
+        text-align: center;
+        position: absolute;
+        top: 50%; left: 50%;
+        transform: translate(-50%, calc(-50% + 90px));
+        letter-spacing: 8px;
+        text-transform: uppercase;
+        z-index: 10;
+      }
+
+      /* Feature cards */
+      .feature-card {
+        position: absolute;
+        left: 50%; top: 50%;
+        transform: translate(-50%, -50%);
+        z-index: 10;
+        text-align: center;
+      }
+      .feature-card-inner { opacity: 1; }
+      .feature-icon {
+        font-size: 80px;
+        margin-bottom: 20px;
+        display: block;
+      }
+      .feature-label {
+        font-size: 64px;
+        font-weight: 800;
+        color: #fff;
+        letter-spacing: -2px;
+      }
+      .feature-desc {
+        font-size: 28px;
+        font-weight: 300;
+        color: rgba(255,255,255,0.5);
+        margin-top: 12px;
+        letter-spacing: 2px;
+      }
+
+      /* Code block */
+      .code-block {
+        position: absolute;
+        left: 50%; top: 50%;
+        transform: translate(-50%, -50%);
+        z-index: 10;
+        background: rgba(15, 15, 25, 0.9);
+        border: 1px solid rgba(99, 102, 241, 0.3);
+        border-radius: 16px;
+        padding: 40px 50px;
+        text-align: left;
+      }
+      .code-block-inner { opacity: 1; }
+      .code-line {
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 28px;
+        color: #a5b4fc;
+        white-space: pre;
+        line-height: 1.6;
+        opacity: 0;
+      }
+      .code-line .kw { color: #c084fc; }
+      .code-line .str { color: #34d399; }
+      .code-line .fn { color: #60a5fa; }
+      .code-line .cm { color: rgba(255,255,255,0.3); }
+
+      /* CTA */
+      .cta-url {
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 48px;
+        color: #818cf8;
+        text-align: center;
+        position: absolute;
+        top: 50%; left: 50%;
+        transform: translate(-50%, -50%);
+        z-index: 10;
+      }
+      .cta-label {
+        font-size: 32px;
+        font-weight: 300;
+        color: rgba(255,255,255,0.5);
+        text-align: center;
+        position: absolute;
+        top: 50%; left: 50%;
+        transform: translate(-50%, calc(-50% + 50px));
+        z-index: 10;
+        letter-spacing: 4px;
+        text-transform: uppercase;
+      }
+
+      /* Progress bar */
+      .progress-bar {
+        position: absolute;
+        bottom: 60px; left: 50%;
+        transform: translateX(-50%);
+        width: 400px; height: 3px;
+        background: rgba(255,255,255,0.1);
+        border-radius: 2px;
+        z-index: 10;
+        overflow: hidden;
+      }
+      .progress-fill {
+        height: 100%;
+        width: 0%;
+        background: linear-gradient(90deg, #6366f1, #a855f7);
+        border-radius: 2px;
+      }
+
+      /* Horizontal accent line */
+      .accent-line {
+        position: absolute;
+        height: 2px;
+        background: linear-gradient(90deg, transparent, #6366f1, transparent);
+        z-index: 9;
+        opacity: 0;
+      }
+    </style>
+  </head>
+  <body>
+    <div data-hf-id="hf-sebc" id="root" data-composition-id="main" data-start="0" data-duration="28" data-width="1920" data-height="1080">
+      <!-- Background elements (track 0) -->
+      <div data-hf-id="hf-ti7y" id="bg-grid" class="bg-grid clip" data-start="0" data-duration="28" data-track-index="0"></div>
+      <div data-hf-id="hf-2p5l" id="glow1" class="glow glow-1 clip" data-start="0" data-duration="28" data-track-index="1"></div>
+      <div data-hf-id="hf-bhle" id="glow2" class="glow glow-2 clip" data-start="0" data-duration="28" data-track-index="2"></div>
+      <div data-hf-id="hf-ph6n" id="glow3" class="glow glow-3 clip" data-start="0" data-duration="28" data-track-index="3"></div>
+      <div data-hf-id="hf-9w76" id="scanline" class="scanline clip" data-start="0" data-duration="28" data-track-index="4"></div>
+
+      <!-- Progress bar (track 5) -->
+      <div data-hf-id="hf-dhva" id="progressbar" class="progress-bar clip" data-start="0" data-duration="28" data-track-index="5">
+        <div data-hf-id="hf-n7ma" class="progress-fill" id="progress"></div>
+      </div>
+
+      <!-- Accent lines (track 6,7) -->
+      <div data-hf-id="hf-a3go" id="accent1" class="accent-line clip" data-start="0" data-duration="28" data-track-index="6" style="top:300px; left:100px; right:100px;"></div>
+      <div data-hf-id="hf-0npg" id="accent2" class="accent-line clip" data-start="0" data-duration="28" data-track-index="7" style="top:780px; left:100px; right:100px;"></div>
+
+      <!-- SCENE 1: Title reveal (track 8,9) -->
+      <h1 data-hf-id="hf-y9j8" id="title" class="title-main clip" data-start="0" data-duration="4" data-track-index="8">
+        HyperFrames
+      </h1>
+      <p data-hf-id="hf-61vi" id="subtitle" class="title-sub clip" data-start="0" data-duration="4" data-track-index="9">
+        Code HTML. Get Video.
+      </p>
+
+      <!-- SCENE 2: Feature - Open Source (track 10) -->
+      <div data-hf-id="hf-x3ma" id="feature1" class="feature-card clip" data-start="4.5" data-duration="4" data-track-index="10">
+        <div data-hf-id="hf-echq" class="feature-card-inner">
+          <span data-hf-id="hf-crbt" class="feature-icon">🔓</span>
+          <div data-hf-id="hf-8d1c" class="feature-label">Open Source</div>
+          <div data-hf-id="hf-db05" class="feature-desc">Sin suscripciones. Sin límites.</div>
+        </div>
+      </div>
+
+      <!-- SCENE 3: Feature - Local (track 11) -->
+      <div data-hf-id="hf-ybgo" id="feature2" class="feature-card clip" data-start="8.5" data-duration="4" data-track-index="11">
+        <div data-hf-id="hf-cyoy" class="feature-card-inner">
+          <span data-hf-id="hf-fndw" class="feature-icon">⚡</span>
+          <div data-hf-id="hf-1622" class="feature-label">100% Local</div>
+          <div data-hf-id="hf-b0lr" class="feature-desc">Renderizado en tu máquina</div>
+        </div>
+      </div>
+
+      <!-- SCENE 4: Feature - GSAP (track 12) -->
+      <div data-hf-id="hf-czx9" id="feature3" class="feature-card clip" data-start="12.5" data-duration="4" data-track-index="12">
+        <div data-hf-id="hf-dczz" class="feature-card-inner">
+          <span data-hf-id="hf-olq5" class="feature-icon">🎬</span>
+          <div data-hf-id="hf-rdr7" class="feature-label">GSAP Animations</div>
+          <div data-hf-id="hf-g6j1" class="feature-desc">Motion graphics profesionales</div>
+        </div>
+      </div>
+
+      <!-- SCENE 5: Code showcase (track 13) -->
+      <div data-hf-id="hf-owia" id="codeblock" class="code-block clip" data-start="16.5" data-duration="4.5" data-track-index="13">
+        <div data-hf-id="hf-f9fw" class="code-block-inner">
+          <div data-hf-id="hf-pnna" class="code-line"><span data-hf-id="hf-il60" class="cm">// Write HTML → Get MP4</span></div>
+          <div data-hf-id="hf-2esa" class="code-line"><span data-hf-id="hf-e64f" class="kw">npx</span> <span data-hf-id="hf-9vsr" class="fn">hyperframes</span> <span data-hf-id="hf-s4a5" class="fn">render</span></div>
+          <div data-hf-id="hf-2t3b" class="code-line"><span data-hf-id="hf-0fyq" class="cm">✓ Captured 840 frames</span></div>
+          <div data-hf-id="hf-37ec" class="code-line"><span data-hf-id="hf-x1qf" class="cm">✓ Encoded to output.mp4</span></div>
+        </div>
+      </div>
+
+      <!-- SCENE 6: CTA (track 14,15) -->
+      <div data-hf-id="hf-znfh" id="cta" class="cta-url clip" data-start="21" data-duration="7" data-track-index="14">
+        github.com/heygen-com/hyperframes
+      </div>
+      <div data-hf-id="hf-rr8z" id="cta-label" class="cta-label clip" data-start="21" data-duration="7" data-track-index="15">
+        Start building today
+      </div>
+
+      <!-- Audio: Narration (track 20) -->
+      <audio data-hf-id="hf-fbx3" id="narration" data-start="0.5" data-duration="26" data-track-index="20" data-volume="1" src="assets/narration.wav"></audio>
+
+      <!-- Audio: Background pad (track 21) -->
+      <audio data-hf-id="hf-zmou" id="bgpad" data-start="0" data-duration="28" data-track-index="21" data-volume="0.3" src="assets/bg_pad.wav"></audio>
+
+      <!-- Audio: SFX (track 22) -->
+      <audio data-hf-id="hf-34ej" id="sfx-boom" data-start="0.3" data-duration="0.6" data-track-index="22" data-volume="0.7" src="assets/boom.wav"></audio>
+      <audio data-hf-id="hf-fpdl" id="sfx-whoosh1" data-start="3.8" data-duration="0.3" data-track-index="22" data-volume="0.5" src="assets/whoosh.wav"></audio>
+      <audio data-hf-id="hf-jz0j" id="sfx-chime1" data-start="4.5" data-duration="0.4" data-track-index="22" data-volume="0.4" src="assets/chime.wav"></audio>
+      <audio data-hf-id="hf-8dfq" id="sfx-whoosh2" data-start="7.8" data-duration="0.2" data-track-index="22" data-volume="0.4" src="assets/whoosh2.wav"></audio>
+      <audio data-hf-id="hf-4uiq" id="sfx-chime2" data-start="8.5" data-duration="0.4" data-track-index="22" data-volume="0.4" src="assets/chime.wav"></audio>
+      <audio data-hf-id="hf-9w50" id="sfx-whoosh3" data-start="11.8" data-duration="0.2" data-track-index="22" data-volume="0.4" src="assets/whoosh2.wav"></audio>
+      <audio data-hf-id="hf-6e96" id="sfx-chime3" data-start="12.5" data-duration="0.4" data-track-index="22" data-volume="0.4" src="assets/chime.wav"></audio>
+      <audio data-hf-id="hf-52cs" id="sfx-click1" data-start="16.5" data-duration="0.1" data-track-index="22" data-volume="0.5" src="assets/click.wav"></audio>
+      <audio data-hf-id="hf-uopb" id="sfx-whoosh4" data-start="20" data-duration="0.3" data-track-index="22" data-volume="0.5" src="assets/whoosh.wav"></audio>
+      <audio data-hf-id="hf-nlon" id="sfx-boom2" data-start="21" data-duration="0.6" data-track-index="22" data-volume="0.5" src="assets/boom.wav"></audio>
+    </div>
+
+    <script>
+      window.__timelines = window.__timelines || {};
+      const tl = gsap.timeline({ paused: true });
+
+      // Progress bar
+      tl.to("#progress", { width: "100%", duration: 28, ease: "none" }, 0);
+
+      // Accent lines
+      tl.from("#accent1", { scaleX: 0, opacity: 0, duration: 1.5, ease: "power2.out" }, 0);
+      tl.from("#accent2", { scaleX: 0, opacity: 0, duration: 1.5, ease: "power2.out" }, 0.3);
+
+      // SCENE 1: Title
+      tl.from("#title", {
+        opacity: 0,
+        scale: 0.5,
+        y: 60,
+        duration: 1.2,
+        ease: "elastic.out(1, 0.5)"
+      }, 0.3);
+
+      tl.from("#subtitle", {
+        opacity: 0,
+        y: 30,
+        duration: 0.8,
+        ease: "power3.out"
+      }, 1.0);
+
+      // Title glow pulse
+      tl.to("#title", {
+        textShadow: "0 0 60px rgba(99,102,241,0.5)",
+        duration: 0.5,
+        yoyo: true,
+        repeat: 1
+      }, 1.5);
+
+      // SCENE 2: Feature 1 - Open Source
+      tl.from("#feature1 .feature-card-inner", {
+        opacity: 0,
+        scale: 0.8,
+        rotation: -3,
+        duration: 0.8,
+        ease: "back.out(1.7)"
+      }, 4.5);
+
+      tl.to("#feature1 .feature-card-inner", {
+        opacity: 0,
+        scale: 1.1,
+        y: -40,
+        duration: 0.5,
+        ease: "power2.in"
+      }, 8.0);
+      tl.set("#feature1 .feature-card-inner", { opacity: 0 }, 8.5);
+
+      // SCENE 3: Feature 2 - Local
+      tl.from("#feature2 .feature-card-inner", {
+        opacity: 0,
+        scale: 0.8,
+        rotation: 3,
+        duration: 0.8,
+        ease: "back.out(1.7)"
+      }, 8.5);
+
+      tl.to("#feature2 .feature-card-inner", {
+        opacity: 0,
+        scale: 1.1,
+        y: -40,
+        duration: 0.5,
+        ease: "power2.in"
+      }, 12.0);
+      tl.set("#feature2 .feature-card-inner", { opacity: 0 }, 12.5);
+
+      // SCENE 4: Feature 3 - GSAP
+      tl.from("#feature3 .feature-card-inner", {
+        opacity: 0,
+        scale: 0.8,
+        rotation: -3,
+        duration: 0.8,
+        ease: "back.out(1.7)"
+      }, 12.5);
+
+      tl.to("#feature3 .feature-card-inner", {
+        opacity: 0,
+        scale: 1.1,
+        y: -40,
+        duration: 0.5,
+        ease: "power2.in"
+      }, 16.0);
+      tl.set("#feature3 .feature-card-inner", { opacity: 0 }, 16.5);
+
+      // SCENE 5: Code block
+      tl.from("#codeblock .code-block-inner", {
+        opacity: 0,
+        x: -80,
+        duration: 0.6,
+        ease: "power3.out"
+      }, 16.5);
+
+      // Animate code lines appearing one by one
+      tl.to("#codeblock .code-line", {
+        opacity: 1,
+        x: 0,
+        stagger: 0.3,
+        duration: 0.3,
+        ease: "power2.out"
+      }, 16.8);
+
+      tl.to("#codeblock .code-block-inner", {
+        opacity: 0,
+        x: 80,
+        duration: 0.5,
+        ease: "power2.in"
+      }, 20.5);
+      tl.set("#codeblock .code-block-inner", { opacity: 0 }, 21);
+
+      // SCENE 6: CTA
+      tl.from("#cta", {
+        opacity: 0,
+        scale: 0.7,
+        duration: 1.0,
+        ease: "elastic.out(1, 0.6)"
+      }, 21);
+
+      tl.from("#cta-label", {
+        opacity: 0,
+        y: 20,
+        duration: 0.6,
+        ease: "power3.out"
+      }, 22);
+
+      // Final glow pulse on CTA
+      tl.to("#cta", {
+        textShadow: "0 0 40px rgba(129,140,248,0.6)",
+        duration: 0.8,
+        yoyo: true,
+        repeat: 2
+      }, 23);
+
+      // Fade out everything at the end
+      tl.to(["#cta", "#cta-label"], {
+        opacity: 0,
+        duration: 1,
+        ease: "power2.in"
+      }, 26.5);
+
+      window.__timelines["main"] = tl;
+    </script>
+  </body>
+</html>

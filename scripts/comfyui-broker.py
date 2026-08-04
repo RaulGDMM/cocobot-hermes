@@ -195,6 +195,7 @@ def detect_comfy_app_dir(root_dir: Path, user_dir: Path) -> Path | None:
         [
             root_dir,
             root_dir / "resources" / "ComfyUI",
+            Path("E:/Comfy-Desktop/ComfyUI-Installs/ComfyUI/ComfyUI"),
             Path("E:/Programs/ComfyUI/resources/ComfyUI"),
         ]
     )
@@ -259,6 +260,7 @@ class BrokerConfig:
     llama_predict: str
     llama_mtp_enabled: bool
     llama_mtp_draft_n_max: str
+    llama_mtp_draft_p_min: str
 
     @classmethod
     def from_env(cls, broker_port_override: int | None = None) -> "BrokerConfig":
@@ -320,7 +322,8 @@ class BrokerConfig:
             llama_presence_penalty=os.environ.get("OPENCLAW_LLAMA_PRESENCE_PENALTY", "0"),
             llama_predict=os.environ.get("OPENCLAW_LLAMA_PREDICT", "81920"),
             llama_mtp_enabled=env_bool("OPENCLAW_LLAMA_MTP_ENABLED", False),
-            llama_mtp_draft_n_max=os.environ.get("OPENCLAW_LLAMA_MTP_DRAFT_N_MAX", "3"),
+            llama_mtp_draft_n_max=os.environ.get("OPENCLAW_LLAMA_MTP_DRAFT_N_MAX", "2"),
+            llama_mtp_draft_p_min=os.environ.get("OPENCLAW_LLAMA_MTP_DRAFT_P_MIN", "0"),
         )
 
     @property
@@ -402,6 +405,7 @@ class BrokerState:
             "llama_running": self.llama_is_ready(),
             "whisper_running": self.whisper_is_running(),
             "comfy_app_dir": str(self.config.comfy_app_dir) if self.config.comfy_app_dir else None,
+            "llama_profile": self.config.llama_profile,
         }
 
     def enqueue(self, job: Job) -> None:
@@ -835,7 +839,7 @@ class BrokerState:
         self.config.llama_slot_save_path.mkdir(parents=True, exist_ok=True)
 
         profile = self.config.llama_profile
-        if profile not in {"qwen35", "qwen36", "qwen36q4", "qwen36_27b_bee_q5", "qwen36_27b_bee_q6", "qwen36_27b", "qwen36_27b_q6", "qwen36_27b_q4_mtp", "qwen36_27b_q5_mtp", "qwen36_27b_q6_mtp", "qwen36_27b_autoround_q6_mtp", "qwen36_27b_nvfp4", "qwen36_27b_nvfp4_1f", "gemma4"}:
+        if profile not in {"qwen35", "qwen36", "qwen36q4", "qwen36_27b_bee_q5", "qwen36_27b_bee_q6", "qwen36_27b", "qwen36_27b_q6", "qwen36_27b_q4_mtp", "qwen36_27b_q5_mtp", "qwen36_27b_q6_mtp", "qwen36_27b_autoround_q6_mtp", "qwen36_27b_bartowski_q6kl_mtp", "gemma4"}:
             profile = "qwen35"
 
         is_ik_llama = "ik_llama" in str(self.config.llama_server_exe.parent)
@@ -883,7 +887,7 @@ class BrokerState:
                 args.extend(["--ctx-checkpoints", str(self.config.llama_ctx_checkpoints), "--swa-full"])
             else:
                 args.extend(["--kv-unified", "--ctx-checkpoints", str(self.config.llama_ctx_checkpoints), "--swa-full"])
-        elif profile in ("qwen36", "qwen36q4", "qwen36_27b_bee_q5", "qwen36_27b_bee_q6", "qwen36_27b", "qwen36_27b_q6", "qwen36_27b_q4_mtp", "qwen36_27b_q5_mtp", "qwen36_27b_q6_mtp", "qwen36_27b_autoround_q6_mtp", "qwen36_27b_nvfp4", "qwen36_27b_nvfp4_1f"):
+        elif profile in ("qwen36", "qwen36q4", "qwen36_27b_bee_q5", "qwen36_27b_bee_q6", "qwen36_27b", "qwen36_27b_q6", "qwen36_27b_q4_mtp", "qwen36_27b_q5_mtp", "qwen36_27b_q6_mtp", "qwen36_27b_autoround_q6_mtp", "qwen36_27b_bartowski_q6kl_mtp"):
             # Qwen3.6 family: jinja, reasoning on, thinking enabled, self-healing template
             args.extend(["--ubatch-size", str(self.config.llama_ubatch_size)])
             args.extend(["--jinja", "--reasoning", "on"])
@@ -891,23 +895,22 @@ class BrokerState:
                 args.extend(["--chat-template-file", str(self.config.llama_chat_template)])
             args.extend(["--image-min-tokens", "1024"])
             args.extend(["--image-max-tokens", "1024"])
-            if profile in ("qwen36_27b", "qwen36_27b_q6", "qwen36_27b_q4_mtp", "qwen36_27b_q5_mtp", "qwen36_27b_q6_mtp", "qwen36_27b_autoround_q6_mtp", "qwen36_27b_nvfp4", "qwen36_27b_nvfp4_1f"):
+            if profile in ("qwen36_27b", "qwen36_27b_q6", "qwen36_27b_q4_mtp", "qwen36_27b_q5_mtp", "qwen36_27b_q6_mtp", "qwen36_27b_autoround_q6_mtp", "qwen36_27b_bartowski_q6kl_mtp"):
                 # Q6_0 KV (ik_llama low-perp) when MTP is on q6 model — fits 131k ctx with parallel 4 + MTP
                 if self.config.llama_mtp_enabled and profile == "qwen36_27b_q6":
                     args.extend(["-ctk", "q6_0", "-ctv", "q6_0"])
                 elif profile in ("qwen36_27b_q4_mtp", "qwen36_27b_q5_mtp"):
                     args.extend(["-ctk", "q8_0", "-ctv", "q8_0"])
-                elif profile in ("qwen36_27b_nvfp4_1f", "qwen36_27b_autoround_q6_mtp"):
-                    # AutoRound pesa ~1.9 GB menos -> usamos ese margen para subir el KV a
-                    # K q8_0 / V q5_1 (mejor recall fino) con ctx 160k. nvfp4_1f comparte la misma config.
+                elif profile in ("qwen36_27b_autoround_q6_mtp", "qwen36_27b_bartowski_q6kl_mtp"):
+                    # High-quality Q6 profiles use K q8_0 / V q5_1 for better fine recall.
                     args.extend(["-ctk", "q8_0", "-ctv", "q5_1"])
-                elif profile in ("qwen36_27b_q6_mtp", "qwen36_27b_nvfp4"):
+                elif profile == "qwen36_27b_q6_mtp":
                     # K/V invertidos vs q4_0/q5_1: mismos bytes pero la mayor precision (q5_1) va a K, que es mas sensible
                     args.extend(["-ctk", "q5_1", "-ctv", "q4_0"])
                 else:
                     args.extend(["-ctk", "q8_0", "-ctv", "q8_0"])  # Q8_0 KV cache + Hadamard rotations
-            # q6_mtp y nvfp4_1f dejan VRAM de sobra: el encoder de vision va a GPU (sin --no-mmproj-offload)
-            if profile in ("qwen36_27b_q6", "qwen36_27b_q4_mtp", "qwen36_27b_q5_mtp", "qwen36_27b_nvfp4") and not is_ik_llama:
+            # Keep vision on CPU only for profiles that reserve their VRAM headroom for KV.
+            if profile in ("qwen36_27b_q6", "qwen36_27b_q4_mtp", "qwen36_27b_q5_mtp") and not is_ik_llama:
                 args.extend(["--no-mmproj-offload"])  # keep vision encoder on CPU to save VRAM (mainline only)
             # Sampling params from env vars (set by start-hermes.ps1)
             args.extend(["--presence-penalty", self.config.llama_presence_penalty])
@@ -925,10 +928,11 @@ class BrokerState:
                                   "--checkpoint-min-step", "8192", "--cache-ram", "32768",
                                   "--no-context-shift", "--no-cache-idle-slots"])
                 elif self.config.llama_mtp_enabled:
-                    # Mainline MTP: dense checkpoints (1k) + RAM spill so divergent prompts only
-                    # reprocess ~1k tokens instead of ~8k from the default checkpoint spacing.
+                    # Mainline MTP: 2k spacing retains a broader span of long agentic histories
+                    # within the checkpoint limit while keeping rollback reasonably fine-grained.
+                    prompt_cache_ram = "32768" if profile in ("qwen36_27b_autoround_q6_mtp", "qwen36_27b_bartowski_q6kl_mtp") else "16384"
                     args.extend(["--kv-unified", "--ctx-checkpoints", str(self.config.llama_ctx_checkpoints),
-                                  "--checkpoint-min-step", "1024", "--cache-ram", "16384",
+                                  "--checkpoint-min-step", "2048", "--cache-ram", prompt_cache_ram,
                                   "--no-context-shift"])
                 else:
                     args.extend(["--kv-unified", "--ctx-checkpoints", str(self.config.llama_ctx_checkpoints),
@@ -946,13 +950,13 @@ class BrokerState:
                 args.extend(["--log-verbosity", "2", "--perf", "--metrics", "--log-timestamps", "--log-prefix"])
             # MTP (Multi-Token Prediction). Upstream llama.cpp uses draft-mtp;
             # ik_llama used the older -mtp spelling.
-            if self.config.llama_mtp_enabled and profile in ("qwen36_27b", "qwen36_27b_q6", "qwen36_27b_q4_mtp", "qwen36_27b_q5_mtp", "qwen36_27b_q6_mtp", "qwen36_27b_autoround_q6_mtp", "qwen36_27b_nvfp4", "qwen36_27b_nvfp4_1f"):
+            if self.config.llama_mtp_enabled and profile in ("qwen36_27b", "qwen36_27b_q6", "qwen36_27b_q4_mtp", "qwen36_27b_q5_mtp", "qwen36_27b_q6_mtp", "qwen36_27b_autoround_q6_mtp", "qwen36_27b_bartowski_q6kl_mtp"):
                 if is_ik_llama:
                     args.extend(["-mtp", "--draft-max", self.config.llama_mtp_draft_n_max])
                 else:
-                    if profile == "qwen36_27b_nvfp4" and self.config.llama_draft_model and self.config.llama_draft_model.exists():
-                        args.extend(["--model-draft", str(self.config.llama_draft_model), "-ngld", "all", "--spec-draft-p-min", "0.3"])
                     args.extend(["--spec-type", "draft-mtp", "--spec-draft-n-max", self.config.llama_mtp_draft_n_max])
+                    if self.config.llama_mtp_draft_p_min != "0":
+                        args.extend(["--spec-draft-p-min", self.config.llama_mtp_draft_p_min])
                     args.extend(["--cache-type-k-draft", "f16", "--cache-type-v-draft", "f16"])
                     args.extend(["--spec-default"])
         elif profile == "gemma4":
@@ -965,7 +969,7 @@ class BrokerState:
 
         # Environment variables needed by specific profiles
         extra_env: dict[str, str] = {}
-        if profile in ("qwen36", "qwen36q4", "qwen36_27b_bee_q5", "qwen36_27b_bee_q6", "qwen36_27b", "qwen36_27b_q6", "qwen36_27b_q4_mtp", "qwen36_27b_q5_mtp", "qwen36_27b_q6_mtp", "qwen36_27b_nvfp4", "qwen36_27b_nvfp4_1f"):
+        if profile in ("qwen36", "qwen36q4", "qwen36_27b_bee_q5", "qwen36_27b_bee_q6", "qwen36_27b", "qwen36_27b_q6", "qwen36_27b_q4_mtp", "qwen36_27b_q5_mtp", "qwen36_27b_q6_mtp", "qwen36_27b_autoround_q6_mtp", "qwen36_27b_bartowski_q6kl_mtp"):
             extra_env["LLAMA_CHAT_TEMPLATE_KWARGS"] = '{"preserve_thinking":true}'
         if profile in ("qwen36_27b_bee_q5", "qwen36_27b_bee_q6"):
             extra_env.update(
