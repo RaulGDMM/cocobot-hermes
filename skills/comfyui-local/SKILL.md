@@ -188,7 +188,7 @@ FLUX.2 Klein's i2i workflow uses **ReferenceLatent chaining** per the official C
 
 ---
 
-# ComfyUI Local — Video Generation (LTX 2.3 and MiniMax H3)
+# ComfyUI Local — Video Generation (MiniMax H3 by default; LTX 2.3 optional)
 
 Use the bundled script to generate videos locally through the broker on the Windows host.
 
@@ -196,7 +196,19 @@ Before calling the script, always send a short confirmation message to the user 
 
 ## MiniMax H3
 
-Select H3 explicitly with `--engine minimax-h3`. It generates native stereo audio jointly with the video and runs at a fixed 24 fps. Normal-quality generations should use the default 20 steps; lower step counts are only smoke tests.
+MiniMax H3 is the default engine because it provides substantially higher visual and audiovisual quality. `--engine minimax-h3` remains accepted when an explicit command is clearer. H3 generates native stereo audio jointly with the video and runs at a fixed 24 fps. Normal-quality generations should use the default 20 steps; lower step counts are only smoke tests.
+
+H3 uses the KJNodes `MiniMaxH3MemoryEfficientSageAttentionPatch` by default. This patches only MiniMax H3 transformer blocks; it does not enable SageAttention globally or change LTX workflows. Use `--no-sage-attention` only for troubleshooting or reproducible A/B comparisons against PyTorch attention.
+
+Validated RTX 5090 stack (2026-08-04):
+
+- ComfyUI Python 3.12, PyTorch `2.10.0+cu130`, CUDA 13.0
+- `sageattention==2.2.0+cu130torch2.10.0andhigher.post6` (`cp310-abi3-win_amd64`)
+- `triton-windows==3.6.0.post26` (Torch 2.10 maps to Triton 3.6; keep it below 3.7)
+- KJNodes commit `195d312a251efdc484c3d9c4570914ab2da9da54`
+- SageAttention wheel SHA-256: `8a8df597c0c0a874c70b0ce915dedf6ab4a1254d577375939f79b8d2dcb0b195`
+
+A same-prompt, same-seed H3 benchmark at 1344x768, 362 frames, and 20 steps completed in 14m44s with SageAttention versus 30m21s with PyTorch attention (2.06x end-to-end, 51.45% less wall time), with no clear visual degradation. Do not use ComfyUI's global `--use-sage-attention` flag for this setup.
 
 Text-to-video:
 
@@ -222,51 +234,85 @@ uv run {baseDir}/scripts/generate_video.py --engine minimax-h3 \
   --image first.png --end-image last.png --prompt 'A smooth transition between both frames' --filename h3-both.mp4
 ```
 
-Reference-to-video accepts up to nine images. Their command-line order defines the prompt tags `<Picture 1>`, `<Picture 2>`, etc. Reference images cannot be combined with first/last-frame conditioning.
+Reference-to-video accepts up to nine images, three videos, and three standalone audio clips, with at most twelve mixed files. Image order defines `<Picture 1>`, `<Picture 2>`, etc.; video order independently defines `<Video 1>`, `<Video 2>`, etc. Audio numbering includes video soundtracks first, followed by standalone `--reference-audio` values. Reference inputs cannot be combined with first/last-frame conditioning.
 
 ```bash
 uv run {baseDir}/scripts/generate_video.py --engine minimax-h3 \
-  --reference-image character.png --reference-image style.png \
-  --prompt 'Use <Picture 1> for character identity and <Picture 2> for visual style. The character walks through a rainy street.' \
+  --reference-image character.png \
+  --reference-video camera-motion.mp4 \
+  --prompt 'Use <Picture 1> for character identity and <Video 1> for camera movement and timing. Generate the character walking through a rainy street.' \
   --filename h3-reference.mp4
 ```
 
 - `--ref-image-size match` is the default and fastest. Use `max` only when stronger identity fidelity justifies much higher compute cost.
+- Repeat `--reference-video` up to three times. Each clip must be 2–15 seconds at 23.976–60 fps, and their combined duration cannot exceed 15 seconds.
+- Reference videos are normalized locally to 24 fps H.264/AAC before upload so their timing matches H3's local Ref2VA node. Supported inputs: MP4, MOV, WebM, MKV, and AVI.
+
+### H3 reference audio modes
+
+H3 standalone audio references require at least one `--reference-image` or `--reference-video`. Repeat `--reference-audio` up to three times; each clip must be 2–15 seconds and their combined duration cannot exceed 15 seconds.
+
+Semantic mode is the default: H3 uses the audio for voice identity, words, cadence, timing, music, or sound design, then jointly generates a new AAC stereo soundtrack.
+
+```bash
+uv run {baseDir}/scripts/generate_video.py \
+  --reference-image portrait.png \
+  --reference-audio speech.wav \
+  --prompt 'Use <Picture 1> as the speaker and <Audio 1> for voice, words, timing, and lip movement.' \
+  --filename h3-semantic-audio.mp4
+```
+
+Exact mode adds `--preserve-reference-audio`: H3 still conditions mouth and motion on `<Audio 1>`, then the script replaces the generated soundtrack with the complete original recording encoded as 16-bit ALAC lossless. The output duration follows the reference audio automatically; any explicit `--duration` is ignored. Exact mode accepts exactly one standalone audio reference.
+
+```bash
+uv run {baseDir}/scripts/generate_video.py \
+  --reference-image portrait.png \
+  --reference-audio speech.wav \
+  --preserve-reference-audio \
+  --prompt 'Use <Picture 1> as the speaker. Match mouth and jaw movement to every syllable and timestamp in <Audio 1>.' \
+  --filename h3-exact-audio.mp4
+```
+
+- Exact mode preserves the decoded PCM16 samples and original sample rate/channel count; it does not merely re-encode to AAC.
+- H3 produces visible speaking motion and joint audiovisual timing, but phoneme-perfect lip sync is not guaranteed. Inspect the result temporally for production use.
+- When reference videos contain audio, their soundtracks consume the first `<Audio N>` tags. The CLI prints the actual tag assigned to each standalone audio.
 - H3 supports 1–15 seconds; frame counts are automatically aligned to the model's 17k+5 temporal grid.
 - H3 presets are multiples of 32. Its `720p` preset maps to the native 1344×768 canvas.
-- Do not combine H3 with LTX-only flags such as `--audio`, `--lipsync`, `--id-lora`, or `--reference-audio`.
+- Do not combine H3 with LTX-only flags such as `--audio`, `--lipsync`, or `--id-lora`.
 - The broker prepares prompts and uploads while Qwen is active, unloads llama.cpp for the GPU job, and restores the exact Qwen profile afterward.
 
 ## LTX 2.3
 
+LTX 2.3 is the faster fallback and must be selected explicitly with `--engine ltx23`. Use it when speed, supplied-audio conditioning, lip-sync, or ID-LoRA matters more than H3's higher generation quality.
+
 Text-to-Video (basic)
 
 ```bash
-uv run {baseDir}/scripts/generate_video.py --prompt "A cat chasing a laser pointer across a living room" --filename "output.mp4"
+uv run {baseDir}/scripts/generate_video.py --engine ltx23 --prompt "A cat chasing a laser pointer across a living room" --filename "output.mp4"
 ```
 
 Image-to-Video (animate a first frame)
 
 ```bash
-uv run {baseDir}/scripts/generate_video.py --image "./first-frame.png" --prompt "The camera slowly zooms in while flowers sway in the wind" --filename "output.mp4"
+uv run {baseDir}/scripts/generate_video.py --engine ltx23 --image "./first-frame.png" --prompt "The camera slowly zooms in while flowers sway in the wind" --filename "output.mp4"
 ```
 
 Audio-conditioned video (the video follows the audio)
 
 ```bash
-uv run {baseDir}/scripts/generate_video.py --audio "./music.mp3" --prompt "A DJ mixing tracks in a neon club" --filename "output.mp4"
+uv run {baseDir}/scripts/generate_video.py --engine ltx23 --audio "./music.mp3" --prompt "A DJ mixing tracks in a neon club" --filename "output.mp4"
 ```
 
 Image + Audio (first frame + audio conditioning)
 
 ```bash
-uv run {baseDir}/scripts/generate_video.py --image "./scene.png" --audio "./narration.wav" --prompt "The narrator describes the scene" --filename "output.mp4"
+uv run {baseDir}/scripts/generate_video.py --engine ltx23 --image "./scene.png" --audio "./narration.wav" --prompt "The narrator describes the scene" --filename "output.mp4"
 ```
 
 Lip-sync mode (best for talking heads / singing)
 
 ```bash
-uv run {baseDir}/scripts/generate_video.py --lipsync --image "./portrait.png" --audio "./speech.wav" --prompt "A woman speaking directly to camera" --filename "lipsync_output.mp4"
+uv run {baseDir}/scripts/generate_video.py --engine ltx23 --lipsync --image "./portrait.png" --audio "./speech.wav" --prompt "A woman speaking directly to camera" --filename "lipsync_output.mp4"
 ```
 
 - Requires both `--image` (face/portrait) and `--audio` (speech/singing audio).
@@ -283,19 +329,19 @@ uv run {baseDir}/scripts/generate_video.py --lipsync --image "./portrait.png" --
 Custom duration, resolution, and aspect ratio
 
 ```bash
-uv run {baseDir}/scripts/generate_video.py --prompt "A drone shot over a mountain range at sunset" --filename "output.mp4" --duration 10 --resolution 1080p --aspect 16:9
+uv run {baseDir}/scripts/generate_video.py --engine ltx23 --prompt "A drone shot over a mountain range at sunset" --filename "output.mp4" --duration 10 --resolution 1080p --aspect 16:9
 ```
 
-**🚫 Avoid editing `generate_video.py` unless you are explicitly asked to update the workflow itself. It already encodes the official LTX 2.3 ID-LoRA template (two-stage distilled pipeline). Just call it with `--id-lora`.**
+**🚫 Avoid editing `generate_video.py` unless you are explicitly asked to update the workflow itself. It already encodes the official LTX 2.3 ID-LoRA template (two-stage distilled pipeline). Just call it with `--engine ltx23 --id-lora`.**
 
 ID-LoRA mode (consistent voice identity from a 5-second reference)
 
 ID-LoRA transfers the voice identity from a ~5-second audio reference to generate new speech with the same voice. The model generates both video and audio jointly — no separate TTS step needed. Lip-sync is built-in.
 
-**⚠️ IMPORTANT: Always use the script below. Do NOT construct the ComfyUI workflow JSON manually — the ID-LoRA pipeline mirrors the official `video_ltx2_3_id_lora` ComfyUI template (BF16 checkpoint `ltx-2.3-22b-dev.safetensors` + distilled LoRA + ID-LoRA stacked, two-stage low/high-res with `LTXVLatentUpsampler`, `CFGGuider` cfg=1.0, `euler_ancestral_cfg_pp` / `euler_cfg_pp`, `ManualSigmas`). All the node wiring is handled internally by `generate_video.py --id-lora`.**
+**⚠️ IMPORTANT: Always use the script below. Do NOT construct the ComfyUI workflow JSON manually — the ID-LoRA pipeline mirrors the official `video_ltx2_3_id_lora` ComfyUI template (BF16 checkpoint `ltx-2.3-22b-dev.safetensors` + distilled LoRA + ID-LoRA stacked, two-stage low/high-res with `LTXVLatentUpsampler`, `CFGGuider` cfg=1.0, `euler_ancestral_cfg_pp` / `euler_cfg_pp`, `ManualSigmas`). All the node wiring is handled internally by `generate_video.py --engine ltx23 --id-lora`.**
 
 ```bash
-uv run {baseDir}/scripts/generate_video.py --id-lora \
+uv run {baseDir}/scripts/generate_video.py --engine ltx23 --id-lora \
   --image "./portrait.png" \
   --reference-audio "./voice_sample.wav" \
   --identity-guidance-scale 1.5 \
@@ -315,7 +361,7 @@ uv run {baseDir}/scripts/generate_video.py --id-lora \
 - Best results with: clear 5s voice sample (no background noise), frontal face image, short clips (3-8s).
 - Can be combined with `--duration`, `--resolution`, `--aspect`, `--steps`, `--seed`.
 - **Do NOT combine** with `--lipsync` or `--audio` — ID-LoRA handles voice generation internally.
-- **Do NOT build the workflow JSON manually** — always call `generate_video.py --id-lora` which handles all the complex node wiring internally.
+- **Do NOT build the workflow JSON manually** — always call `generate_video.py --engine ltx23 --id-lora` which handles all the complex node wiring internally.
 
 **💡 ID-LoRA — Lip-sync & quality tips (tested on RTX 5090):**
 1. **Use `--identity-guidance-scale 1.5`** (not the default 3.0) — lower guidance = more facial movement while keeping voice identity
@@ -334,14 +380,14 @@ Same character, different lines (voice stays consistent across videos):
 
 ```bash
 # First video
-uv run {baseDir}/scripts/generate_video.py --id-lora \
+uv run {baseDir}/scripts/generate_video.py --engine ltx23 --id-lora \
   --image "./gato.png" --reference-audio "./gato_voice.wav" \
   --identity-guidance-scale 1.5 \
   --prompt "[VISUAL]: A black cat speaks to camera. The character opens its mouth wide to speak clearly, its jaw moving with each word [SPEECH]: Yo soy el guardian de los secretos [SOUNDS]: deep mysterious male voice, echo" \
   --filename "scene1.mp4"
 
 # Second video — same voice reference, different text
-uv run {baseDir}/scripts/generate_video.py --id-lora \
+uv run {baseDir}/scripts/generate_video.py --engine ltx23 --id-lora \
   --image "./gato.png" --reference-audio "./gato_voice.wav" \
   --identity-guidance-scale 1.5 \
   --prompt "[VISUAL]: The same black cat turns to look at something off-screen. Opens its mouth wide to speak clearly [SPEECH]: Los humanos no comprenden nuestro poder [SOUNDS]: deep mysterious male voice, wind" \
@@ -357,7 +403,7 @@ uv run {baseDir}/scripts/generate_video.py --id-lora \
 Optional quality controls
 
 ```bash
-uv run {baseDir}/scripts/generate_video.py --prompt "description" --filename "output.mp4" --steps 24 --seed 42
+uv run {baseDir}/scripts/generate_video.py --engine ltx23 --prompt "description" --filename "output.mp4" --steps 24 --seed 42
 ```
 
 Resolution presets
@@ -399,7 +445,7 @@ Notes (video)
 - For image-to-video, `--image` accepts a local path. The script uploads it to the broker automatically.
 - `--aspect` and `--resolution` are ignored in i2v mode if the image already defines dimensions (the image is resized to the closest preset).
 - Video generation is significantly slower than image generation. A 5s 720p video may take several minutes.
-- **CRITICAL**: Always use `exec timeout=1800` for video generation. The default exec timeout (300s) is NOT enough. Example: `exec timeout=1800 uv run {baseDir}/scripts/generate_video.py ...`
+- **CRITICAL**: Always use `exec timeout=1800` for video generation. The default exec timeout (300s) is NOT enough. LTX example: `exec timeout=1800 uv run {baseDir}/scripts/generate_video.py --engine ltx23 ...`
 - After generation, send the video with the `message` tool: `{ "action": "send", "message": "Aquí va el video", "media": "./output.mp4" }`.
 - One video per invocation. Do not batch video requests.
 

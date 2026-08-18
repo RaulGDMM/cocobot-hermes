@@ -6,8 +6,8 @@
 # MTP tampoco funciona con multimodal. Volver a ik_llama cuando ambos problemas esten resueltos.
 $useLlamaInstall = "stable"
 
-# Modelo LLM: "qwen36_27b_bee_q5", "qwen36_27b_bee_q6", "qwen36_27b", "qwen36_27b_q6", "qwen36_27b_q4_mtp", "qwen36_27b_q5_mtp", "qwen36_27b_q6_mtp", "qwen36_27b_autoround_q6_mtp", "qwen36_27b_bartowski_q6kl_mtp", "qwen36", "qwen36q4", "qwen35", "gemma4"
-$useModel = "qwen36_27b_bartowski_q6kl_mtp"
+# Modelo LLM: "qwen38_27b_unsloth_q6k_mtp", "qwen38_27b_nvfp4_q8attn_mtp", "qwen36_27b_bee_q5", "qwen36_27b_bee_q6", "qwen36_27b", "qwen36_27b_q6", "qwen36_27b_q4_mtp", "qwen36_27b_q5_mtp", "qwen36_27b_q6_mtp", "qwen36_27b_autoround_q6_mtp", "qwen36_27b_bartowski_q6kl_mtp", "qwen36", "qwen36q4", "qwen35", "gemma4"
+$useModel = "qwen38_27b_nvfp4_q8attn_mtp"
 
 # Herramienta browser: $true para activarla, $false para desactivarla
 $useBrowserTool = $true
@@ -85,7 +85,7 @@ function Invoke-LlamaWarmup {
         if (-not $modelId) { $modelId = ($models.data | Where-Object { $_.id -ne "default" } | Select-Object -First 1).id }
         if (-not $modelId) { $modelId = $models.data[0].id }
     } catch {
-        $modelId = "qwen3.6-27b"
+        $modelId = if ($useModel -in @("qwen38_27b_unsloth_q6k_mtp","qwen38_27b_nvfp4_q8attn_mtp")) { "qwen3.8-27b" } else { "qwen3.6-27b" }
     }
     Write-Host "  Modelo: $modelId" -ForegroundColor Gray
     $warmupBody = @{
@@ -176,6 +176,14 @@ if ($useModel -eq "qwen36") {
     $modelLabel    = "Qwen3.6-27B Bartowski Q6_K_L MTP"
     $modelSize     = "22.6 GiB, MTP/NextN integrado Q8_0, vision+thinking, KV K Q8_0 / V Q5_1 + draft KV F16, ctx 115k"
     $ctxSize       = "115000"
+} elseif ($useModel -eq "qwen38_27b_unsloth_q6k_mtp") {
+    $modelLabel    = "Qwen3.8-27B Unsloth Q6_K MTP"
+    $modelSize     = "21.3 GiB, MTP integrado, vision+thinking xhigh, KV K Q8_0 / V Q5_1 + draft KV F16, ctx 140k"
+    $ctxSize       = "140000"
+} elseif ($useModel -eq "qwen38_27b_nvfp4_q8attn_mtp") {
+    $modelLabel    = "Qwen3.8-27B NVFP4-MTP-Q8attn (utautako)"
+    $modelSize     = "17.8 GiB, MTP integrado, FFN NVFP4 + atencion/DeltaNet Q8_0, vision+thinking xhigh, KV K Q8_0 / V Q5_1 + draft KV F16, ctx 230k (margen VRAM)"
+    $ctxSize       = "230000"
 } elseif ($useModel -eq "gemma4") {
     $modelLabel    = "Gemma 4 31B-it UD-Q4_K_XL"
     $modelSize     = "17.5 GB, vision+thinking"
@@ -187,12 +195,14 @@ if ($useModel -eq "qwen36") {
 }
 
 # Sampling params — single source of truth for both llama-server and broker restarts
-$env:OPENCLAW_LLAMA_TEMP = "0.6"
+# 2026-08-15: qwen38 = 1.0 (recomendación oficial Unsloth para 3.8 thinking-only;
+# se probó 0.8 y se volvió al punto sintonizado oficial). Resto de perfiles: 0.6.
+$env:OPENCLAW_LLAMA_TEMP = if ($useModel -in @("qwen38_27b_unsloth_q6k_mtp","qwen38_27b_nvfp4_q8attn_mtp")) { "1.0" } else { "0.6" }
 $env:OPENCLAW_LLAMA_TOP_P = "0.95"
 $env:OPENCLAW_LLAMA_TOP_K = "20"
 $env:OPENCLAW_LLAMA_MIN_P = "0"
 $env:OPENCLAW_LLAMA_PREDICT = "81920"
-if ($useModel -in @("qwen36_27b_bee_q5","qwen36_27b_bee_q6","qwen36_27b","qwen36_27b_q6","qwen36_27b_q4_mtp","qwen36_27b_q5_mtp","qwen36_27b_q6_mtp","qwen36_27b_autoround_q6_mtp","qwen36_27b_bartowski_q6kl_mtp")) {
+if ($useModel -in @("qwen38_27b_unsloth_q6k_mtp","qwen38_27b_nvfp4_q8attn_mtp","qwen36_27b_bee_q5","qwen36_27b_bee_q6","qwen36_27b","qwen36_27b_q6","qwen36_27b_q4_mtp","qwen36_27b_q5_mtp","qwen36_27b_q6_mtp","qwen36_27b_autoround_q6_mtp","qwen36_27b_bartowski_q6kl_mtp")) {
     $env:OPENCLAW_LLAMA_PRESENCE_PENALTY = "0"
 } else {
     $env:OPENCLAW_LLAMA_PRESENCE_PENALTY = "1.5"
@@ -201,8 +211,10 @@ if ($useModel -in @("qwen36_27b_bee_q5","qwen36_27b_bee_q6","qwen36_27b","qwen36
 # MTP (Multi-Token Prediction) — upstream llama.cpp mainline uses --spec-type draft-mtp.
 # Requires a GGUF that includes MTP/NextN heads. Keep this isolated in qwen36_27b_*_mtp
 # so BeeLlama/DFlash remains one edit away if MTP is not stable enough for Hermes.
-$env:OPENCLAW_LLAMA_MTP_ENABLED = if ($useModel -in @("qwen36_27b_q4_mtp","qwen36_27b_q5_mtp","qwen36_27b_q6_mtp","qwen36_27b_autoround_q6_mtp","qwen36_27b_bartowski_q6kl_mtp")) { "1" } else { "0" }
-$env:OPENCLAW_LLAMA_MTP_DRAFT_N_MAX = "2"
+$env:OPENCLAW_LLAMA_MTP_ENABLED = if ($useModel -in @("qwen38_27b_unsloth_q6k_mtp","qwen38_27b_nvfp4_q8attn_mtp","qwen36_27b_q4_mtp","qwen36_27b_q5_mtp","qwen36_27b_q6_mtp","qwen36_27b_autoround_q6_mtp","qwen36_27b_bartowski_q6kl_mtp")) { "1" } else { "0" }
+# 2026-08-15: 3 (default llama.cpp) para qwen38 — con 65% acceptance y meanlen 2.5
+# el 3er token draftado casi siempre se acepta (+5-12% TG). Resto de perfiles: 2.
+$env:OPENCLAW_LLAMA_MTP_DRAFT_N_MAX = if ($useModel -in @("qwen38_27b_unsloth_q6k_mtp","qwen38_27b_nvfp4_q8attn_mtp")) { "3" } else { "2" }
 $env:OPENCLAW_LLAMA_MTP_DRAFT_P_MIN = "0"
 
 Write-Host "[1/6] Comprobando llama-server ($modelLabel)..." -ForegroundColor Yellow
@@ -250,6 +262,12 @@ if ($useModel -eq "qwen36") {
 } elseif ($useModel -eq "qwen36_27b_bartowski_q6kl_mtp") {
     $modelFile    = Join-Path $openclawRoot "models\qwen36-27b\Qwen_Qwen3.6-27B-Q6_K_L.gguf"
     $mmProjFile   = Join-Path $openclawRoot "models\qwen36-27b\mmproj-BF16.gguf"
+} elseif ($useModel -eq "qwen38_27b_unsloth_q6k_mtp") {
+    $modelFile    = Join-Path $openclawRoot "models\qwen38-27b\Qwen3.8-27B-Q6_K.gguf"
+    $mmProjFile   = Join-Path $openclawRoot "models\qwen38-27b\mmproj-BF16.gguf"
+} elseif ($useModel -eq "qwen38_27b_nvfp4_q8attn_mtp") {
+    $modelFile    = Join-Path $openclawRoot "models\qwen38-27b\Qwen3.8-27B-NVFP4-MTP-Q8attn.gguf"
+    $mmProjFile   = Join-Path $openclawRoot "models\qwen38-27b\mmproj-BF16.gguf"
 } elseif ($useModel -eq "gemma4") {
     $modelFile    = Join-Path $openclawRoot "models\gemma4-31b\gemma-4-31B-it-UD-Q4_K_XL.gguf"
     $mmProjFile   = Join-Path $openclawRoot "models\gemma4-31b\mmproj-BF16.gguf"
@@ -286,7 +304,7 @@ else {
         $llamaLaunchEnv = @{}
         $llamaArgs = @(
             "--model",               $modelFile,
-            "--alias",               "qwen3.6-27b,$useModel",
+            "--alias",               $(if ($useModel -in @("qwen38_27b_unsloth_q6k_mtp","qwen38_27b_nvfp4_q8attn_mtp")) { "qwen3.8-27b,$useModel" } else { "qwen3.6-27b,$useModel" }),
             "--mmproj",              $mmProjFile,
             "--ctx-size",            $ctxSize,
             "--slot-save-path",      $slotCachePath,
@@ -299,20 +317,21 @@ else {
             "--log-file",            $llamaLogFile
         )
         # Model-specific flags
-        if ($useModel -in @("qwen36","qwen36q4","qwen36_27b_bee_q5","qwen36_27b_bee_q6","qwen36_27b","qwen36_27b_q6","qwen36_27b_q4_mtp","qwen36_27b_q5_mtp","qwen36_27b_q6_mtp","qwen36_27b_autoround_q6_mtp","qwen36_27b_bartowski_q6kl_mtp")) {
-            $chatTemplateFile = Join-Path $openclawRoot "models\qwen36-27b\qwen3.6-enhanced.jinja"
-            $ubatchSize = if ($useModel -in @("qwen36_27b_q6_mtp","qwen36_27b_autoround_q6_mtp","qwen36_27b_bartowski_q6kl_mtp")) { "1024" } else { "2048" }
+        if ($useModel -in @("qwen38_27b_unsloth_q6k_mtp","qwen38_27b_nvfp4_q8attn_mtp","qwen36","qwen36q4","qwen36_27b_bee_q5","qwen36_27b_bee_q6","qwen36_27b","qwen36_27b_q6","qwen36_27b_q4_mtp","qwen36_27b_q5_mtp","qwen36_27b_q6_mtp","qwen36_27b_autoround_q6_mtp","qwen36_27b_bartowski_q6kl_mtp")) {
+            $chatTemplateFile = if ($useModel -in @("qwen38_27b_unsloth_q6k_mtp","qwen38_27b_nvfp4_q8attn_mtp")) { $null } else { Join-Path $openclawRoot "models\qwen36-27b\qwen3.6-enhanced.jinja" }
+            $ubatchSize = if ($useModel -in @("qwen38_27b_unsloth_q6k_mtp","qwen38_27b_nvfp4_q8attn_mtp","qwen36_27b_q6_mtp","qwen36_27b_autoround_q6_mtp","qwen36_27b_bartowski_q6kl_mtp")) { "1024" } else { "2048" }
             $llamaArgs += @("--ubatch-size", $ubatchSize)
             $llamaArgs += @("--jinja")
-            $llamaArgs += @("--chat-template-file", $chatTemplateFile)
+            if ($chatTemplateFile) { $llamaArgs += @("--chat-template-file", $chatTemplateFile) }
             $llamaArgs += @("--reasoning", "on")
+            if ($useModel -in @("qwen38_27b_unsloth_q6k_mtp","qwen38_27b_nvfp4_q8attn_mtp")) { $llamaArgs += @("--reasoning-preserve") }
             $llamaArgs += @("--image-min-tokens", "1024")
             $llamaArgs += @("--image-max-tokens", "1024")
             $llamaArgs += @("--presence-penalty", $env:OPENCLAW_LLAMA_PRESENCE_PENALTY)
             $llamaArgs += @("--min-p", $env:OPENCLAW_LLAMA_MIN_P)
             $llamaArgs += @("--predict", $env:OPENCLAW_LLAMA_PREDICT)
             $llamaArgs += @("--temp", $env:OPENCLAW_LLAMA_TEMP, "--top-p", $env:OPENCLAW_LLAMA_TOP_P, "--top-k", $env:OPENCLAW_LLAMA_TOP_K)
-            $chatTemplateKwargs = '{"preserve_thinking":true,"tool_call_format":"xml"}'
+            $chatTemplateKwargs = if ($useModel -in @("qwen38_27b_unsloth_q6k_mtp","qwen38_27b_nvfp4_q8attn_mtp")) { '{"enable_thinking":true,"preserve_thinking":true,"reasoning_effort":"xhigh"}' } else { '{"preserve_thinking":true,"tool_call_format":"xml"}' }
             $env:LLAMA_CHAT_TEMPLATE_KWARGS = $chatTemplateKwargs
             $llamaLaunchEnv["LLAMA_CHAT_TEMPLATE_KWARGS"] = $chatTemplateKwargs
             $llamaArgs += @("--no-prefill-assistant")
@@ -337,7 +356,7 @@ else {
                 # a broader span of long agentic histories within the 32-checkpoint limit.
                 # --cache-ram bounds the secondary prompt cache; live slot checkpoints use process RAM.
                 # --kv-unified is mainline-only and compatible with MTP (single shared KV pool).
-                $promptCacheRam = if ($useModel -in @("qwen36_27b_autoround_q6_mtp","qwen36_27b_bartowski_q6kl_mtp")) { "32768" } else { "16384" }
+                $promptCacheRam = if ($useModel -in @("qwen38_27b_unsloth_q6k_mtp","qwen38_27b_nvfp4_q8attn_mtp","qwen36_27b_autoround_q6_mtp","qwen36_27b_bartowski_q6kl_mtp")) { "32768" } else { "16384" }
                 $llamaArgs += @("--kv-unified", "--ctx-checkpoints", "32", "--checkpoint-min-step", "2048", "--cache-ram", $promptCacheRam, "--no-context-shift")
             } else {
                 $llamaArgs += @("--kv-unified", "--ctx-checkpoints", "32", "--checkpoint-min-step", "1024", "--cache-ram", "16384", "--no-context-shift")
@@ -359,13 +378,13 @@ else {
                     $llamaLaunchEnv[$kv.Key] = $kv.Value
                 }
                 Write-Host "  BeeLlama DFlash activado (draft Q4_K_M, KV turbo4/turbo3_tcq, parallel=1, logs resumen)" -ForegroundColor Cyan
-            } elseif ($useModel -in @("qwen36_27b","qwen36_27b_q6","qwen36_27b_q4_mtp","qwen36_27b_q5_mtp","qwen36_27b_q6_mtp","qwen36_27b_autoround_q6_mtp","qwen36_27b_bartowski_q6kl_mtp")) {
+            } elseif ($useModel -in @("qwen38_27b_unsloth_q6k_mtp","qwen38_27b_nvfp4_q8attn_mtp","qwen36_27b","qwen36_27b_q6","qwen36_27b_q4_mtp","qwen36_27b_q5_mtp","qwen36_27b_q6_mtp","qwen36_27b_autoround_q6_mtp","qwen36_27b_bartowski_q6kl_mtp")) {
                 if ($useLlamaInstall -eq "ik_llama" -and $useModel -eq "qwen36_27b_q6") {
                     # Q6_0 KV cache (ik_llama exclusive low-perp variant) — leaves headroom for MTP draft
                     $llamaArgs += @("-ctk", "q6_0", "-ctv", "q6_0")
                 } elseif ($useModel -in @("qwen36_27b_q4_mtp","qwen36_27b_q5_mtp")) {
                     $llamaArgs += @("-ctk", "q8_0", "-ctv", "q8_0")
-                } elseif ($useModel -in @("qwen36_27b_autoround_q6_mtp","qwen36_27b_bartowski_q6kl_mtp")) {
+                } elseif ($useModel -in @("qwen38_27b_unsloth_q6k_mtp","qwen38_27b_nvfp4_q8attn_mtp","qwen36_27b_autoround_q6_mtp","qwen36_27b_bartowski_q6kl_mtp")) {
                     # AutoRound pesa ~1.9 GB menos -> usamos ese margen para subir el KV a
                     # K q8_0 / V q5_1 (mejor recall fino).
                     $llamaArgs += @("-ctk", "q8_0", "-ctv", "q5_1")
@@ -387,13 +406,13 @@ else {
                     $llamaArgs += @("-mtp", "--draft-max", $env:OPENCLAW_LLAMA_MTP_DRAFT_N_MAX)
                     Write-Host "  MTP activado (-mtp --draft-max $($env:OPENCLAW_LLAMA_MTP_DRAFT_N_MAX))" -ForegroundColor Cyan
                 } else {
-                    $llamaArgs += @("--spec-type", "draft-mtp", "--spec-draft-n-max", $env:OPENCLAW_LLAMA_MTP_DRAFT_N_MAX)
+                    $llamaArgs += @("--spec-type", "draft-mtp,ngram-mod", "--spec-draft-n-max", $env:OPENCLAW_LLAMA_MTP_DRAFT_N_MAX)
                     if ($env:OPENCLAW_LLAMA_MTP_DRAFT_P_MIN -ne "0") {
                         $llamaArgs += @("--spec-draft-p-min", $env:OPENCLAW_LLAMA_MTP_DRAFT_P_MIN)
                     }
                     $llamaArgs += @("--cache-type-k-draft", "f16", "--cache-type-v-draft", "f16")
                     $llamaArgs += @("--spec-default")
-                    Write-Host "  MTP activado (--spec-type draft-mtp --spec-draft-n-max $($env:OPENCLAW_LLAMA_MTP_DRAFT_N_MAX), p-min $($env:OPENCLAW_LLAMA_MTP_DRAFT_P_MIN), draft KV F16 + --spec-default ngram-mod)" -ForegroundColor Cyan
+                    Write-Host "  MTP + ngram-mod activados (--spec-type draft-mtp,ngram-mod --spec-draft-n-max $($env:OPENCLAW_LLAMA_MTP_DRAFT_N_MAX), p-min $($env:OPENCLAW_LLAMA_MTP_DRAFT_P_MIN), draft KV F16 + --spec-default)" -ForegroundColor Cyan
                 }
             }
         }
@@ -642,14 +661,14 @@ if ($brokerScript) {
             if ($llamaLogFile) { $env:OPENCLAW_LLAMA_LOG_FILE = $llamaLogFile }
             $env:OPENCLAW_LLAMA_PORT = [string]$llamaPort
             $env:OPENCLAW_LLAMA_CTX_SIZE = $ctxSize
-            $env:OPENCLAW_LLAMA_PARALLEL = if ($useModel -in @("qwen36_27b_bee_q5","qwen36_27b_bee_q6","qwen36_27b_q4_mtp","qwen36_27b_q5_mtp","qwen36_27b_q6_mtp","qwen36_27b_autoround_q6_mtp","qwen36_27b_bartowski_q6kl_mtp")) { "1" } else { "2" }
+            $env:OPENCLAW_LLAMA_PARALLEL = if ($useModel -in @("qwen38_27b_unsloth_q6k_mtp","qwen38_27b_nvfp4_q8attn_mtp","qwen36_27b_bee_q5","qwen36_27b_bee_q6","qwen36_27b_q4_mtp","qwen36_27b_q5_mtp","qwen36_27b_q6_mtp","qwen36_27b_autoround_q6_mtp","qwen36_27b_bartowski_q6kl_mtp")) { "1" } else { "2" }
             $env:OPENCLAW_LLAMA_N_GPU_LAYERS = "99"
             $env:OPENCLAW_LLAMA_BATCH_SIZE = "2048"
             $env:OPENCLAW_LLAMA_PROFILE = $useModel
-            if ($useModel -in @("qwen36","qwen36q4","qwen36_27b_bee_q5","qwen36_27b_bee_q6","qwen36_27b","qwen36_27b_q6","qwen36_27b_q4_mtp","qwen36_27b_q5_mtp","qwen36_27b_q6_mtp","qwen36_27b_autoround_q6_mtp","qwen36_27b_bartowski_q6kl_mtp")) {
-                $env:OPENCLAW_LLAMA_UBATCH_SIZE = if ($useModel -in @("qwen36_27b_q6_mtp","qwen36_27b_autoround_q6_mtp","qwen36_27b_bartowski_q6kl_mtp")) { "1024" } else { "2048" }
+            if ($useModel -in @("qwen38_27b_unsloth_q6k_mtp","qwen38_27b_nvfp4_q8attn_mtp","qwen36","qwen36q4","qwen36_27b_bee_q5","qwen36_27b_bee_q6","qwen36_27b","qwen36_27b_q6","qwen36_27b_q4_mtp","qwen36_27b_q5_mtp","qwen36_27b_q6_mtp","qwen36_27b_autoround_q6_mtp","qwen36_27b_bartowski_q6kl_mtp")) {
+                $env:OPENCLAW_LLAMA_UBATCH_SIZE = if ($useModel -in @("qwen38_27b_unsloth_q6k_mtp","qwen38_27b_nvfp4_q8attn_mtp","qwen36_27b_q6_mtp","qwen36_27b_autoround_q6_mtp","qwen36_27b_bartowski_q6kl_mtp")) { "1024" } else { "2048" }
                 $env:OPENCLAW_LLAMA_CTX_CHECKPOINTS = "32"
-                $env:OPENCLAW_LLAMA_CHAT_TEMPLATE = Join-Path $openclawRoot "models\qwen36-27b\qwen3.6-enhanced.jinja"
+                $env:OPENCLAW_LLAMA_CHAT_TEMPLATE = if ($useModel -in @("qwen38_27b_unsloth_q6k_mtp","qwen38_27b_nvfp4_q8attn_mtp")) { "" } else { Join-Path $openclawRoot "models\qwen36-27b\qwen3.6-enhanced.jinja" }
             } elseif ($useModel -eq "qwen35") {
                 $env:OPENCLAW_LLAMA_UBATCH_SIZE = "2048"
                 $env:OPENCLAW_LLAMA_CTX_CHECKPOINTS = "32"

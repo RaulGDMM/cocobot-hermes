@@ -112,6 +112,8 @@ echo ""
 
 # Sync context_length in config.yaml based on model
 case "${USE_MODEL}" in
+  qwen38_27b_unsloth_q6k_mtp) CTX_LEN=140000 ;;
+  qwen38_27b_nvfp4_q8attn_mtp) CTX_LEN=230000 ;;
   qwen36_27b_bee_q5) CTX_LEN=262144 ;;
   qwen36_27b_bee_q6) CTX_LEN=191608 ;;
   qwen36_27b)      CTX_LEN=200000 ;;
@@ -129,9 +131,14 @@ HERMES_CONFIG="$HOME/.hermes/config.yaml"
 if [[ -f "$HERMES_CONFIG" ]]; then
   sed -i "s/  context_length: .*/  context_length: ${CTX_LEN}/" "$HERMES_CONFIG"
   echo "[config] context_length actualizado a ${CTX_LEN}"
+  case "${USE_MODEL}" in
+    qwen38_27b_unsloth_q6k_mtp) MODEL_ALIAS="qwen3.8-27b" ;;
+    qwen38_27b_nvfp4_q8attn_mtp) MODEL_ALIAS="qwen3.8-27b" ;;
+    *)                        MODEL_ALIAS="qwen3.6-27b" ;;
+  esac
   if grep -q '^model:' "$HERMES_CONFIG"; then
-    sed -i '0,/^  default: .*/s//  default: qwen3.6-27b/' "$HERMES_CONFIG"
-    echo "[config] model.default=qwen3.6-27b"
+    sed -i "0,/^  default: .*/s//  default: ${MODEL_ALIAS}/" "$HERMES_CONFIG"
+    echo "[config] model.default=${MODEL_ALIAS}"
   fi
   if grep -q '^compression:' "$HERMES_CONFIG"; then
     sed -i "s/  protect_last_n: .*/  protect_last_n: 10/" "$HERMES_CONFIG"

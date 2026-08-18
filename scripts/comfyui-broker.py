@@ -424,14 +424,6 @@ class BrokerState:
     def llama_is_ready(self) -> bool:
         return url_ok(f"{self.config.llama_base_url}/health", timeout=2.0)
 
-    def _llama_slot_persistence_supported(self) -> bool:
-        # ik_llama.cpp supports slot save/restore with multimodal models
-        exe = self.config.llama_server_exe
-        if exe and "ik_llama" in str(exe.parent):
-            return True
-        mmproj = self.config.llama_mmproj
-        return not (mmproj and mmproj.exists())
-
     def _llama_slot_alias(self) -> str | None:
         if not self.config.llama_model:
             return None
@@ -473,9 +465,6 @@ class BrokerState:
         return 0
 
     def _save_llama_slots(self) -> None:
-        if not self._llama_slot_persistence_supported():
-            self._log("Skipping KV slot save: llama.cpp slot save/restore is not supported for multimodal servers")
-            return
         alias = self._llama_slot_alias()
         if not alias:
             self._log("Skipping KV slot save: no llama model alias available")
@@ -513,7 +502,7 @@ class BrokerState:
                     payload=body,
                     timeout=120,
                 )
-                size_mb = round(float(resp.get("n_read", 0)) / (1024 * 1024), 1)
+                size_mb = round(float(resp.get("n_bytes", resp.get("n_read", 0))) / (1024 * 1024), 1)
                 self._log(f"Saved KV slot {slot_id} ({decoded} tokens, {size_mb} MB, {filename})")
                 saved += 1
             except Exception as exc:
@@ -524,9 +513,6 @@ class BrokerState:
             self._log("No eligible KV slots to save")
 
     def _restore_llama_slots(self) -> None:
-        if not self._llama_slot_persistence_supported():
-            self._log("Skipping KV slot restore: llama.cpp slot save/restore is not supported for multimodal servers")
-            return
         alias = self._llama_slot_alias()
         if not alias:
             self._log("Skipping KV slot restore: no llama model alias available")
@@ -553,9 +539,11 @@ class BrokerState:
                     payload=body,
                     timeout=120,
                 )
-                restored_tokens = int(resp.get("n_restored", 0))
+                restored_tokens = int(resp.get("n_tokens", resp.get("n_restored", 0)))
                 timings = resp.get("timings") if isinstance(resp, dict) else {}
-                restore_ms = timings.get("restore_ms") if isinstance(timings, dict) else None
+                restore_ms = resp.get("t_ms")
+                if restore_ms is None and isinstance(timings, dict):
+                    restore_ms = timings.get("restore_ms")
                 restore_label = f", {restore_ms} ms" if restore_ms is not None else ""
                 self._log(f"Restored KV slot {slot_id} ({restored_tokens} tokens{restore_label})")
                 restored += 1
@@ -839,7 +827,7 @@ class BrokerState:
         self.config.llama_slot_save_path.mkdir(parents=True, exist_ok=True)
 
         profile = self.config.llama_profile
-        if profile not in {"qwen35", "qwen36", "qwen36q4", "qwen36_27b_bee_q5", "qwen36_27b_bee_q6", "qwen36_27b", "qwen36_27b_q6", "qwen36_27b_q4_mtp", "qwen36_27b_q5_mtp", "qwen36_27b_q6_mtp", "qwen36_27b_autoround_q6_mtp", "qwen36_27b_bartowski_q6kl_mtp", "gemma4"}:
+        if profile not in {"qwen35", "qwen38_27b_unsloth_q6k_mtp", "qwen38_27b_nvfp4_q8attn_mtp", "qwen36", "qwen36q4", "qwen36_27b_bee_q5", "qwen36_27b_bee_q6", "qwen36_27b", "qwen36_27b_q6", "qwen36_27b_q4_mtp", "qwen36_27b_q5_mtp", "qwen36_27b_q6_mtp", "qwen36_27b_autoround_q6_mtp", "qwen36_27b_bartowski_q6kl_mtp", "gemma4"}:
             profile = "qwen35"
 
         is_ik_llama = "ik_llama" in str(self.config.llama_server_exe.parent)
@@ -849,7 +837,7 @@ class BrokerState:
             "--model",
             str(self.config.llama_model),
             "--alias",
-            f"qwen3.6-27b,{profile}",
+            f"{'qwen3.8-27b' if profile in ('qwen38_27b_unsloth_q6k_mtp', 'qwen38_27b_nvfp4_q8attn_mtp') else 'qwen3.6-27b'},{profile}",
         ]
 
         if self.config.llama_mmproj and self.config.llama_mmproj.exists():
@@ -887,21 +875,23 @@ class BrokerState:
                 args.extend(["--ctx-checkpoints", str(self.config.llama_ctx_checkpoints), "--swa-full"])
             else:
                 args.extend(["--kv-unified", "--ctx-checkpoints", str(self.config.llama_ctx_checkpoints), "--swa-full"])
-        elif profile in ("qwen36", "qwen36q4", "qwen36_27b_bee_q5", "qwen36_27b_bee_q6", "qwen36_27b", "qwen36_27b_q6", "qwen36_27b_q4_mtp", "qwen36_27b_q5_mtp", "qwen36_27b_q6_mtp", "qwen36_27b_autoround_q6_mtp", "qwen36_27b_bartowski_q6kl_mtp"):
-            # Qwen3.6 family: jinja, reasoning on, thinking enabled, self-healing template
+        elif profile in ("qwen38_27b_unsloth_q6k_mtp", "qwen38_27b_nvfp4_q8attn_mtp", "qwen36", "qwen36q4", "qwen36_27b_bee_q5", "qwen36_27b_bee_q6", "qwen36_27b", "qwen36_27b_q6", "qwen36_27b_q4_mtp", "qwen36_27b_q5_mtp", "qwen36_27b_q6_mtp", "qwen36_27b_autoround_q6_mtp", "qwen36_27b_bartowski_q6kl_mtp"):
+            # Qwen3.6/3.8 family: jinja, reasoning on, thinking enabled
             args.extend(["--ubatch-size", str(self.config.llama_ubatch_size)])
             args.extend(["--jinja", "--reasoning", "on"])
+            if profile in ("qwen38_27b_unsloth_q6k_mtp", "qwen38_27b_nvfp4_q8attn_mtp"):
+                args.append("--reasoning-preserve")
             if self.config.llama_chat_template and self.config.llama_chat_template.exists():
                 args.extend(["--chat-template-file", str(self.config.llama_chat_template)])
             args.extend(["--image-min-tokens", "1024"])
             args.extend(["--image-max-tokens", "1024"])
-            if profile in ("qwen36_27b", "qwen36_27b_q6", "qwen36_27b_q4_mtp", "qwen36_27b_q5_mtp", "qwen36_27b_q6_mtp", "qwen36_27b_autoround_q6_mtp", "qwen36_27b_bartowski_q6kl_mtp"):
+            if profile in ("qwen38_27b_unsloth_q6k_mtp", "qwen38_27b_nvfp4_q8attn_mtp", "qwen36_27b", "qwen36_27b_q6", "qwen36_27b_q4_mtp", "qwen36_27b_q5_mtp", "qwen36_27b_q6_mtp", "qwen36_27b_autoround_q6_mtp", "qwen36_27b_bartowski_q6kl_mtp"):
                 # Q6_0 KV (ik_llama low-perp) when MTP is on q6 model — fits 131k ctx with parallel 4 + MTP
                 if self.config.llama_mtp_enabled and profile == "qwen36_27b_q6":
                     args.extend(["-ctk", "q6_0", "-ctv", "q6_0"])
                 elif profile in ("qwen36_27b_q4_mtp", "qwen36_27b_q5_mtp"):
                     args.extend(["-ctk", "q8_0", "-ctv", "q8_0"])
-                elif profile in ("qwen36_27b_autoround_q6_mtp", "qwen36_27b_bartowski_q6kl_mtp"):
+                elif profile in ("qwen38_27b_unsloth_q6k_mtp", "qwen38_27b_nvfp4_q8attn_mtp", "qwen36_27b_autoround_q6_mtp", "qwen36_27b_bartowski_q6kl_mtp"):
                     # High-quality Q6 profiles use K q8_0 / V q5_1 for better fine recall.
                     args.extend(["-ctk", "q8_0", "-ctv", "q5_1"])
                 elif profile == "qwen36_27b_q6_mtp":
@@ -930,7 +920,7 @@ class BrokerState:
                 elif self.config.llama_mtp_enabled:
                     # Mainline MTP: 2k spacing retains a broader span of long agentic histories
                     # within the checkpoint limit while keeping rollback reasonably fine-grained.
-                    prompt_cache_ram = "32768" if profile in ("qwen36_27b_autoround_q6_mtp", "qwen36_27b_bartowski_q6kl_mtp") else "16384"
+                    prompt_cache_ram = "32768" if profile in ("qwen38_27b_unsloth_q6k_mtp", "qwen38_27b_nvfp4_q8attn_mtp", "qwen36_27b_autoround_q6_mtp", "qwen36_27b_bartowski_q6kl_mtp") else "16384"
                     args.extend(["--kv-unified", "--ctx-checkpoints", str(self.config.llama_ctx_checkpoints),
                                   "--checkpoint-min-step", "2048", "--cache-ram", prompt_cache_ram,
                                   "--no-context-shift"])
@@ -950,11 +940,11 @@ class BrokerState:
                 args.extend(["--log-verbosity", "2", "--perf", "--metrics", "--log-timestamps", "--log-prefix"])
             # MTP (Multi-Token Prediction). Upstream llama.cpp uses draft-mtp;
             # ik_llama used the older -mtp spelling.
-            if self.config.llama_mtp_enabled and profile in ("qwen36_27b", "qwen36_27b_q6", "qwen36_27b_q4_mtp", "qwen36_27b_q5_mtp", "qwen36_27b_q6_mtp", "qwen36_27b_autoround_q6_mtp", "qwen36_27b_bartowski_q6kl_mtp"):
+            if self.config.llama_mtp_enabled and profile in ("qwen38_27b_unsloth_q6k_mtp", "qwen38_27b_nvfp4_q8attn_mtp", "qwen36_27b", "qwen36_27b_q6", "qwen36_27b_q4_mtp", "qwen36_27b_q5_mtp", "qwen36_27b_q6_mtp", "qwen36_27b_autoround_q6_mtp", "qwen36_27b_bartowski_q6kl_mtp"):
                 if is_ik_llama:
                     args.extend(["-mtp", "--draft-max", self.config.llama_mtp_draft_n_max])
                 else:
-                    args.extend(["--spec-type", "draft-mtp", "--spec-draft-n-max", self.config.llama_mtp_draft_n_max])
+                    args.extend(["--spec-type", "draft-mtp,ngram-mod", "--spec-draft-n-max", self.config.llama_mtp_draft_n_max])
                     if self.config.llama_mtp_draft_p_min != "0":
                         args.extend(["--spec-draft-p-min", self.config.llama_mtp_draft_p_min])
                     args.extend(["--cache-type-k-draft", "f16", "--cache-type-v-draft", "f16"])
@@ -969,8 +959,10 @@ class BrokerState:
 
         # Environment variables needed by specific profiles
         extra_env: dict[str, str] = {}
-        if profile in ("qwen36", "qwen36q4", "qwen36_27b_bee_q5", "qwen36_27b_bee_q6", "qwen36_27b", "qwen36_27b_q6", "qwen36_27b_q4_mtp", "qwen36_27b_q5_mtp", "qwen36_27b_q6_mtp", "qwen36_27b_autoround_q6_mtp", "qwen36_27b_bartowski_q6kl_mtp"):
-            extra_env["LLAMA_CHAT_TEMPLATE_KWARGS"] = '{"preserve_thinking":true}'
+        if profile in ("qwen38_27b_unsloth_q6k_mtp", "qwen38_27b_nvfp4_q8attn_mtp"):
+            extra_env["LLAMA_CHAT_TEMPLATE_KWARGS"] = '{"enable_thinking":true,"preserve_thinking":true,"reasoning_effort":"xhigh"}'
+        elif profile in ("qwen36", "qwen36q4", "qwen36_27b_bee_q5", "qwen36_27b_bee_q6", "qwen36_27b", "qwen36_27b_q6", "qwen36_27b_q4_mtp", "qwen36_27b_q5_mtp", "qwen36_27b_q6_mtp", "qwen36_27b_autoround_q6_mtp", "qwen36_27b_bartowski_q6kl_mtp"):
+            extra_env["LLAMA_CHAT_TEMPLATE_KWARGS"] = '{"preserve_thinking":true,"tool_call_format":"xml"}'
         if profile in ("qwen36_27b_bee_q5", "qwen36_27b_bee_q6"):
             extra_env.update(
                 {
@@ -1524,23 +1516,33 @@ class BrokerHandler(BaseHTTPRequestHandler):
         self._send_json(501, {"error": "Poll not implemented yet; use blocking mode"})
 
     def _handle_upload(self) -> None:
-        """Accept a binary file upload (image or audio) → save to ComfyUI input dir, return filename."""
+        """Accept an image, audio, or video upload and save it to ComfyUI's input directory."""
         content_length = int(self.headers.get("Content-Length", 0))
         if content_length <= 0:
             self._send_json(400, {"error": "Empty body"})
             return
-        max_size = 50 * 1024 * 1024  # 50 MB
+        ct = (self.headers.get("Content-Type") or "").lower()
+        max_size = (250 if ct.startswith("video/") else 50) * 1024 * 1024
         if content_length > max_size:
             self._send_json(413, {"error": f"File too large (max {max_size} bytes)"})
             return
 
         body = self.rfile.read(content_length)
         ext = ".png"
-        ct = (self.headers.get("Content-Type") or "").lower()
         if "jpeg" in ct or "jpg" in ct:
             ext = ".jpg"
         elif "webp" in ct:
             ext = ".webp"
+        elif "video/mp4" in ct:
+            ext = ".mp4"
+        elif "video/quicktime" in ct:
+            ext = ".mov"
+        elif "video/webm" in ct:
+            ext = ".webm"
+        elif "video/x-matroska" in ct:
+            ext = ".mkv"
+        elif "video/x-msvideo" in ct:
+            ext = ".avi"
         elif "audio/wav" in ct or "audio/x-wav" in ct:
             ext = ".wav"
         elif "audio/mpeg" in ct:
@@ -1627,10 +1629,8 @@ def main() -> None:
     _raw_log(f"llama_server_exe: {config.llama_server_exe}")
     _raw_log(f"llama_model: {config.llama_model}")
     _raw_log(f"use_backend: {config.use_backend} | llama_port: {config.llama_port}")
-    if config.llama_mmproj and config.llama_mmproj.exists():
-        _raw_log("KV slot persistence: disabled for multimodal llama-server (--mmproj); upstream slot save/restore returns 501")
-    else:
-        _raw_log(f"KV slot persistence: enabled | slot_save_path={config.llama_slot_save_path}")
+    slot_mode = "text-only slots; media slots are skipped" if config.llama_mmproj and config.llama_mmproj.exists() else "all slots"
+    _raw_log(f"KV slot persistence: enabled for {slot_mode} | slot_save_path={config.llama_slot_save_path}")
     _raw_log("Press Ctrl+C to stop")
 
     try:

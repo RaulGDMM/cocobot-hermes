@@ -2,7 +2,7 @@
 # /// script
 # requires-python = ">=3.10"
 # ///
-"""Generate videos locally through the ComfyUI broker (LTX 2.3 or MiniMax H3)."""
+"""Generate videos locally through the ComfyUI broker (MiniMax H3 or LTX 2.3)."""
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 from urllib import error as urlerror
@@ -23,6 +24,7 @@ DEFAULT_BROKER_URL = "http://host.docker.internal:8791"
 DEFAULT_TIMEOUT_SECONDS = 1800
 DEFAULT_FPS = 24
 DEFAULT_STEPS = 20
+DEFAULT_ENGINE = "minimax-h3"
 
 NEGATIVE_PROMPT = (
     "blurry, low quality, still frame, frames, watermark, "
@@ -1613,7 +1615,7 @@ def build_idlora_workflow(
 
 
 # ---------------------------------------------------------------------------
-# MiniMax H3 workflow (T2V / first-last-frame I2V / reference-image R2V)
+# MiniMax H3 workflow (T2V / first-last-frame I2V / multimodal R2V)
 # ---------------------------------------------------------------------------
 
 def build_h3_workflow(
@@ -1628,16 +1630,29 @@ def build_h3_workflow(
     input_image: str | None = None,
     input_end_image: str | None = None,
     reference_images: list[str] | None = None,
+    reference_videos: list[str] | None = None,
+    reference_audios: list[str] | None = None,
     ref_image_size: str = "match",
+    sage_attention: bool = True,
 ) -> dict[str, object]:
     """Build a native MiniMax H3 ComfyUI workflow in API format."""
-    references = reference_images or []
-    if len(references) > 9:
+    image_references = reference_images or []
+    video_references = reference_videos or []
+    audio_references = reference_audios or []
+    if len(image_references) > 9:
         raise ValueError("MiniMax H3 supports at most 9 reference images")
-    if references and (input_image or input_end_image):
+    if len(video_references) > 3:
+        raise ValueError("MiniMax H3 supports at most 3 reference videos")
+    if len(audio_references) > 3:
+        raise ValueError("MiniMax H3 supports at most 3 reference audio clips")
+    if len(image_references) + len(video_references) + len(audio_references) > 12:
+        raise ValueError("MiniMax H3 supports at most 12 mixed reference files")
+    has_references = bool(image_references or video_references or audio_references)
+    if has_references and (input_image or input_end_image):
         raise ValueError("H3 reference mode cannot be combined with first/last keyframes")
 
-    model_name = H3_MODEL_REF2VA if references else H3_MODEL_FL2VA
+    model_name = H3_MODEL_REF2VA if has_references else H3_MODEL_FL2VA
+    model_source = ["15", 0] if sage_attention else ["1", 0]
     conditioning_inputs: dict[str, object] = {
         "clip": ["2", 0],
         "vae": ["3", 0],
@@ -1667,22 +1682,52 @@ def build_h3_workflow(
             "class_type": "VAELoader",
             "inputs": {"vae_name": H3_AUDIO_VAE},
         },
+        **(
+            {
+                "15": {
+                    "class_type": "MiniMaxH3MemoryEfficientSageAttentionPatch",
+                    "inputs": {"model": ["1", 0]},
+                }
+            }
+            if sage_attention
+            else {}
+        ),
     }
 
-    if references:
+    if has_references:
         conditioning_inputs.update(
             {
                 "audio_vae": ["4", 0],
                 "ref_image_size": ref_image_size,
             }
         )
-        for index, image_name in enumerate(references):
+        for index, image_name in enumerate(image_references):
             node_id = str(20 + index)
             workflow[node_id] = {
                 "class_type": "LoadImage",
                 "inputs": {"image": image_name},
             }
             conditioning_inputs[f"ref_images.ref_image_{index}"] = [node_id, 0]
+        for index, video_name in enumerate(video_references):
+            load_node_id = str(40 + index * 2)
+            components_node_id = str(41 + index * 2)
+            workflow[load_node_id] = {
+                "class_type": "LoadVideo",
+                "inputs": {"file": video_name},
+            }
+            workflow[components_node_id] = {
+                "class_type": "GetVideoComponents",
+                "inputs": {"video": [load_node_id, 0]},
+            }
+            conditioning_inputs[f"ref_videos.ref_video_{index}"] = [components_node_id, 0]
+            conditioning_inputs[f"ref_video_audios.ref_video_audio_{index}"] = [components_node_id, 1]
+        for index, audio_name in enumerate(audio_references):
+            node_id = str(60 + index)
+            workflow[node_id] = {
+                "class_type": "LoadAudio",
+                "inputs": {"audio": audio_name},
+            }
+            conditioning_inputs[f"ref_audios.ref_audio_{index}"] = [node_id, 0]
         conditioning_type = "MiniMaxH3ReferenceToVideo"
     else:
         if input_image:
@@ -1707,12 +1752,12 @@ def build_h3_workflow(
             },
             "6": {
                 "class_type": "BasicGuider",
-                "inputs": {"model": ["1", 0], "conditioning": ["5", 0]},
+                "inputs": {"model": model_source, "conditioning": ["5", 0]},
             },
             "7": {
                 "class_type": "BasicScheduler",
                 "inputs": {
-                    "model": ["1", 0],
+                    "model": model_source,
                     "scheduler": "simple",
                     "steps": steps,
                     "denoise": 1.0,
@@ -1775,13 +1820,135 @@ AUDIO_CONTENT_TYPES = {
     ".m4a": "audio/mp4",
     ".aac": "audio/aac",
 }
+VIDEO_EXTENSIONS = {".mp4", ".mov", ".webm", ".mkv", ".avi"}
+VIDEO_CONTENT_TYPES = {
+    ".mp4": "video/mp4",
+    ".mov": "video/quicktime",
+    ".webm": "video/webm",
+    ".mkv": "video/x-matroska",
+    ".avi": "video/x-msvideo",
+}
+H3_REFERENCE_VIDEO_MIN_SECONDS = 2.0
+H3_REFERENCE_VIDEO_MAX_SECONDS = 15.1
+H3_REFERENCE_VIDEO_MIN_FPS = 23.9
+H3_REFERENCE_VIDEO_MAX_FPS = 60.1
+
+
+def probe_reference_video(file_path: Path) -> tuple[float, float]:
+    """Return reference video duration and frame rate using ffprobe."""
+    result = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=avg_frame_rate:format=duration",
+            "-of",
+            "json",
+            str(file_path),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    metadata = json.loads(result.stdout)
+    duration = float(metadata["format"]["duration"])
+    frame_rate = metadata["streams"][0]["avg_frame_rate"]
+    numerator, denominator = frame_rate.split("/", 1)
+    fps = float(numerator) / float(denominator)
+    return duration, fps
+
+
+def probe_media_duration(file_path: Path) -> float:
+    """Return a media file's duration using ffprobe."""
+    result = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            str(file_path),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return float(result.stdout.strip())
+
+
+def media_has_audio(file_path: Path) -> bool:
+    """Return whether a media file contains at least one audio stream."""
+    result = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "a:0",
+            "-show_entries",
+            "stream=index",
+            "-of",
+            "csv=p=0",
+            str(file_path),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return bool(result.stdout.strip())
+
+
+def normalize_h3_reference_video(source: Path, target: Path) -> None:
+    """Normalize a supported H3 reference clip to 24 fps H.264 with optional AAC audio."""
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-i",
+            str(source),
+            "-map",
+            "0:v:0",
+            "-map",
+            "0:a:0?",
+            "-vf",
+            "fps=24",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "medium",
+            "-crf",
+            "18",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "192k",
+            "-ar",
+            "32000",
+            "-ac",
+            "2",
+            "-movflags",
+            "+faststart",
+            str(target),
+        ],
+        check=True,
+    )
 
 
 def upload_file(broker_url: str, file_path: Path, timeout: int = 60) -> str:
-    """Upload a local file (image or audio) to the broker and return the filename in ComfyUI input dir."""
+    """Upload a local image, audio, or video and return its ComfyUI input filename."""
     data = file_path.read_bytes()
     suffix = file_path.suffix.lower()
-    ct = AUDIO_CONTENT_TYPES.get(suffix)
+    ct = AUDIO_CONTENT_TYPES.get(suffix) or VIDEO_CONTENT_TYPES.get(suffix)
     if ct is None:
         ct = "image/png"
         if suffix in (".jpg", ".jpeg"):
@@ -1886,6 +2053,40 @@ def download_file(
         raise last_error
 
 
+def replace_audio_track(video_path: Path, audio_path: Path, *, lossless: bool) -> bool:
+    """Replace a video's generated audio; use ALAC to preserve decoded PCM when requested."""
+    tmp_path = video_path.with_suffix(".tmp.mp4")
+    audio_codec_args = ["-c:a", "alac", "-sample_fmt", "s16p"] if lossless else ["-c:a", "aac", "-b:a", "192k"]
+    duration_args = [] if lossless else ["-shortest"]
+    command = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        str(video_path),
+        "-i",
+        str(audio_path),
+        "-map",
+        "0:v:0",
+        "-map",
+        "1:a:0",
+        "-c:v",
+        "copy",
+        *audio_codec_args,
+        *duration_args,
+        "-movflags",
+        "+faststart",
+        str(tmp_path),
+    ]
+    try:
+        subprocess.run(command, check=True, capture_output=True, timeout=300)
+        tmp_path.replace(video_path)
+        return True
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        if tmp_path.exists():
+            tmp_path.unlink()
+        return False
+
+
 # ---------------------------------------------------------------------------
 # Core generation logic
 # ---------------------------------------------------------------------------
@@ -1910,7 +2111,11 @@ def generate_video(
     id_lora: bool = False,
     reference_audio: str | None = None,
     reference_images: list[str] | None = None,
+    reference_videos: list[str] | None = None,
+    h3_reference_audios: list[str] | None = None,
     ref_image_size: str = "match",
+    sage_attention: bool = True,
+    preserve_reference_audio: bool = False,
     identity_guidance_scale: float = 3.0,
     original_audio_path: Path | None = None,
     negative_prompt: str = NEGATIVE_PROMPT,
@@ -1931,17 +2136,25 @@ def generate_video(
             input_image=input_image,
             input_end_image=input_end_image,
             reference_images=reference_images,
+            reference_videos=reference_videos,
+            reference_audios=h3_reference_audios,
             ref_image_size=ref_image_size,
+            sage_attention=sage_attention,
         )
-        if reference_images:
-            label = f"h3-r2v ({len(reference_images)} refs), seed={seed}, {width}x{height}, {frames}f"
+        sage_tag = "+sage" if sage_attention else "+pytorch-attention"
+        if reference_images or reference_videos or h3_reference_audios:
+            image_count = len(reference_images or [])
+            video_count = len(reference_videos or [])
+            audio_count = len(h3_reference_audios or [])
+            audio_mode = "+exact-audio" if preserve_reference_audio else "+semantic-audio" if audio_count else ""
+            label = f"h3-r2v{sage_tag}{audio_mode} ({image_count} images, {video_count} videos, {audio_count} audios), seed={seed}, {width}x{height}, {frames}f"
         elif input_image or input_end_image:
             keyframes = "+".join(
                 name for name, present in (("first", input_image), ("last", input_end_image)) if present
             )
-            label = f"h3-i2v ({keyframes}), seed={seed}, {width}x{height}, {frames}f"
+            label = f"h3-i2v{sage_tag} ({keyframes}), seed={seed}, {width}x{height}, {frames}f"
         else:
-            label = f"h3-t2v, seed={seed}, {width}x{height}, {frames}f"
+            label = f"h3-t2v{sage_tag}, seed={seed}, {width}x{height}, {frames}f"
     elif id_lora and input_image and reference_audio:
         workflow = build_idlora_workflow(
             prompt=prompt,
@@ -2049,29 +2262,14 @@ def generate_video(
     except Exception as exc:
         return f"Error downloading broker output: {exc}"
 
-    # For lipsync mode, replace the model-generated audio with the original
-    if lipsync and original_audio_path and original_audio_path.exists():
-        tmp_path = output_path.with_suffix(".tmp.mp4")
-        ffmpeg_cmd = [
-            "ffmpeg", "-y",
-            "-i", str(output_path),
-            "-i", str(original_audio_path),
-            "-map", "0:v:0",
-            "-map", "1:a:0",
-            "-c:v", "copy",
-            "-c:a", "aac", "-b:a", "192k",
-            "-shortest",
-            str(tmp_path),
-        ]
-        try:
-            subprocess.run(ffmpeg_cmd, check=True, capture_output=True, timeout=120)
-            tmp_path.replace(output_path)
-            print(f"Audio replaced with original: {original_audio_path.name}")
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
-            # Non-fatal: keep the model-generated audio
-            print(f"Warning: could not replace audio ({exc}). Keeping model audio.", file=sys.stderr)
-            if tmp_path.exists():
-                tmp_path.unlink()
+    # LTX lip-sync keeps AAC compatibility; H3 exact mode preserves decoded PCM losslessly with ALAC.
+    if (lipsync or preserve_reference_audio) and original_audio_path and original_audio_path.exists():
+        replaced = replace_audio_track(output_path, original_audio_path, lossless=preserve_reference_audio)
+        if replaced:
+            codec = "ALAC lossless" if preserve_reference_audio else "AAC"
+            print(f"Audio replaced with original ({codec}): {original_audio_path.name}")
+        else:
+            print("Warning: could not replace audio. Keeping model-generated audio.", file=sys.stderr)
 
     print(f"Video saved: {output_path.resolve()}")
     print(f"SOURCE_FILENAME: {primary.get('filename')}")
@@ -2085,13 +2283,13 @@ def generate_video(
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Generate videos locally through the ComfyUI broker (LTX 2.3 or MiniMax H3)"
+        description="Generate videos locally through the ComfyUI broker (MiniMax H3 or LTX 2.3)"
     )
     parser.add_argument(
         "--engine",
         choices=["ltx23", "minimax-h3"],
-        default="ltx23",
-        help="Generation engine (default: ltx23)",
+        default=DEFAULT_ENGINE,
+        help=f"Generation engine (default: {DEFAULT_ENGINE})",
     )
     parser.add_argument("--prompt", "-p", required=True, help="Video description (t2v) or action description (i2v)")
     parser.add_argument("--filename", "-f", required=True, help="Output filename (e.g. output.mp4)")
@@ -2104,6 +2302,12 @@ def main() -> int:
         help="H3 reference image; repeat up to 9 times in <Picture N> order",
     )
     parser.add_argument(
+        "--reference-video",
+        action="append",
+        default=[],
+        help="H3 reference video; repeat up to 3 times in <Video N> order (paired soundtrack is preserved)",
+    )
+    parser.add_argument(
         "--ref-image-size",
         choices=["match", "max"],
         default="match",
@@ -2112,7 +2316,17 @@ def main() -> int:
     parser.add_argument("--audio", default=None, help="Audio file to condition the video on (wav/mp3/ogg/flac/m4a)")
     parser.add_argument("--lipsync", action="store_true", help="Lip-sync mode: isolate vocals with MelBand RoFormer for better lip synchronisation (requires --image and --audio)")
     parser.add_argument("--id-lora", action="store_true", help="ID-LoRA mode: transfer voice identity from a ~5s reference audio to generate speech with consistent voice (requires --image and --reference-audio)")
-    parser.add_argument("--reference-audio", default=None, help="Reference audio (~5s) for ID-LoRA voice identity transfer (wav/mp3/ogg/flac/m4a)")
+    parser.add_argument(
+        "--reference-audio",
+        action="append",
+        default=[],
+        help="Reference audio: repeat up to 3 times for H3 Ref2VA, or pass once for LTX ID-LoRA",
+    )
+    parser.add_argument(
+        "--preserve-reference-audio",
+        action="store_true",
+        help="H3 exact-audio mode: condition on one reference audio, then remux it losslessly into the result",
+    )
     parser.add_argument("--identity-guidance-scale", type=float, default=3.0, help="Identity guidance scale for ID-LoRA (default 3.0, higher = stronger voice identity)")
     parser.add_argument(
         "--duration",
@@ -2137,6 +2351,12 @@ def main() -> int:
     )
     parser.add_argument("--fps", type=int, default=None, help=f"Frames per second (default {DEFAULT_FPS}, or {IDLORA_DEFAULT_FPS} when --id-lora)")
     parser.add_argument("--steps", type=int, default=DEFAULT_STEPS, help=f"Sampling steps (default {DEFAULT_STEPS})")
+    parser.add_argument(
+        "--sage-attention",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Use the MiniMax H3-specific SageAttention patch (default: enabled; use --no-sage-attention for an A/B baseline)",
+    )
     parser.add_argument("--seed", type=int, default=None, help="Seed for reproducibility")
     parser.add_argument("--count", "-n", type=int, default=1, help="Number of videos to generate (each with different seed)")
     parser.add_argument("--negative-prompt", default=None, help="Negative prompt (what to avoid). Appended to built-in negatives unless prefixed with !")
@@ -2153,23 +2373,48 @@ def main() -> int:
             incompatible.append("--id-lora")
         if args.audio:
             incompatible.append("--audio")
-        if args.reference_audio:
-            incompatible.append("--reference-audio")
         if incompatible:
             print(f"MiniMax H3 does not support these LTX options: {', '.join(incompatible)}", file=sys.stderr)
             return 1
-        if args.reference_image and (args.image or args.end_image):
-            print("H3 --reference-image cannot be combined with --image/--end-image", file=sys.stderr)
+        has_h3_references = bool(args.reference_image or args.reference_video or args.reference_audio)
+        if has_h3_references and (args.image or args.end_image):
+            print("H3 reference inputs cannot be combined with --image/--end-image", file=sys.stderr)
             return 1
         if len(args.reference_image) > 9:
             print("MiniMax H3 supports at most 9 --reference-image values", file=sys.stderr)
             return 1
+        if len(args.reference_video) > 3:
+            print("MiniMax H3 supports at most 3 --reference-video values", file=sys.stderr)
+            return 1
+        if len(args.reference_audio) > 3:
+            print("MiniMax H3 supports at most 3 --reference-audio values", file=sys.stderr)
+            return 1
+        if args.reference_audio and not (args.reference_image or args.reference_video):
+            print("H3 --reference-audio requires at least one --reference-image or --reference-video", file=sys.stderr)
+            return 1
+        if args.preserve_reference_audio and len(args.reference_audio) != 1:
+            print("--preserve-reference-audio requires exactly one --reference-audio", file=sys.stderr)
+            return 1
+        total_reference_files = len(args.reference_image) + len(args.reference_video) + len(args.reference_audio)
+        if total_reference_files > 12:
+            print(f"MiniMax H3 supports at most 12 mixed reference files (got {total_reference_files})", file=sys.stderr)
+            return 1
         if args.fps is not None and args.fps != 24:
             print("MiniMax H3 runs at a fixed 24 fps", file=sys.stderr)
             return 1
-    elif args.reference_image:
-        print("--reference-image requires --engine minimax-h3", file=sys.stderr)
-        return 1
+    else:
+        if args.reference_image or args.reference_video:
+            print("--reference-image/--reference-video require --engine minimax-h3", file=sys.stderr)
+            return 1
+        if args.preserve_reference_audio:
+            print("--preserve-reference-audio requires --engine minimax-h3", file=sys.stderr)
+            return 1
+        if args.reference_audio and not args.id_lora:
+            print("LTX --reference-audio requires --id-lora", file=sys.stderr)
+            return 1
+        if len(args.reference_audio) > 1:
+            print("LTX ID-LoRA accepts exactly one --reference-audio", file=sys.stderr)
+            return 1
 
     broker_url = (
         args.broker_url
@@ -2196,8 +2441,43 @@ def main() -> int:
     elif args.fps is None:
         args.fps = IDLORA_DEFAULT_FPS if getattr(args, "id_lora", False) else DEFAULT_FPS
 
+    # Validate H3 standalone audio references before resolving output duration.
+    reference_audio_metadata: list[tuple[Path, float]] = []
+    if is_h3:
+        total_reference_audio_duration = 0.0
+        for index, reference in enumerate(args.reference_audio, start=1):
+            reference_path = Path(reference)
+            if not reference_path.exists():
+                print(f"Reference audio {index} not found: {reference_path}", file=sys.stderr)
+                return 1
+            if reference_path.suffix.lower() not in AUDIO_EXTENSIONS:
+                print(f"Unsupported reference audio format: {reference_path.suffix}", file=sys.stderr)
+                return 1
+            try:
+                reference_duration = probe_media_duration(reference_path)
+            except Exception as exc:
+                print(f"Could not inspect reference audio {index}: {exc}", file=sys.stderr)
+                return 1
+            if not H3_REFERENCE_VIDEO_MIN_SECONDS <= reference_duration <= H3_REFERENCE_VIDEO_MAX_SECONDS:
+                print(
+                    f"Reference audio {index} must be 2-15 seconds (got {reference_duration:.3f}s)",
+                    file=sys.stderr,
+                )
+                return 1
+            total_reference_audio_duration += reference_duration
+            reference_audio_metadata.append((reference_path, reference_duration))
+        if total_reference_audio_duration > H3_REFERENCE_VIDEO_MAX_SECONDS:
+            print(
+                f"H3 reference audios may total at most 15 seconds (got {total_reference_audio_duration:.3f}s)",
+                file=sys.stderr,
+            )
+            return 1
+
+    requested_duration = reference_audio_metadata[0][1] if args.preserve_reference_audio else args.duration
+    if args.preserve_reference_audio:
+        print(f"Exact-audio mode: output duration follows reference audio ({requested_duration:.3f}s)")
     # Duration -> frames
-    duration = max(1.0, min(args.duration, 15.0 if is_h3 else 20.0))
+    duration = max(1.0, min(requested_duration, 15.0 if is_h3 else 20.0))
     frames = h3_duration_to_frames(duration) if is_h3 else duration_to_frames(duration, args.fps)
 
     seed = args.seed if args.seed is not None else int(time.time() * 1000) % 2147483647
@@ -2253,10 +2533,68 @@ def main() -> int:
             print(f"Error uploading reference image {index}: {exc}", file=sys.stderr)
             return 1
 
+    # Validate, normalize, and upload H3 reference videos in <Video N> order.
+    reference_video_metadata: list[tuple[Path, float, float, bool]] = []
+    total_reference_video_duration = 0.0
+    for index, reference in enumerate(args.reference_video, start=1):
+        reference_path = Path(reference)
+        if not reference_path.exists():
+            print(f"Reference video {index} not found: {reference_path}", file=sys.stderr)
+            return 1
+        if reference_path.suffix.lower() not in VIDEO_EXTENSIONS:
+            print(f"Unsupported reference video format: {reference_path.suffix}", file=sys.stderr)
+            return 1
+        try:
+            reference_duration, reference_fps = probe_reference_video(reference_path)
+        except Exception as exc:
+            print(f"Could not inspect reference video {index}: {exc}", file=sys.stderr)
+            return 1
+        if not H3_REFERENCE_VIDEO_MIN_SECONDS <= reference_duration <= H3_REFERENCE_VIDEO_MAX_SECONDS:
+            print(
+                f"Reference video {index} must be 2-15 seconds (got {reference_duration:.3f}s)",
+                file=sys.stderr,
+            )
+            return 1
+        if not H3_REFERENCE_VIDEO_MIN_FPS <= reference_fps <= H3_REFERENCE_VIDEO_MAX_FPS:
+            print(
+                f"Reference video {index} must be 23.976-60 fps (got {reference_fps:.3f} fps)",
+                file=sys.stderr,
+            )
+            return 1
+        total_reference_video_duration += reference_duration
+        reference_video_metadata.append(
+            (reference_path, reference_duration, reference_fps, media_has_audio(reference_path))
+        )
+    if total_reference_video_duration > H3_REFERENCE_VIDEO_MAX_SECONDS:
+        print(
+            f"H3 reference videos may total at most 15 seconds (got {total_reference_video_duration:.3f}s)",
+            file=sys.stderr,
+        )
+        return 1
+
+    uploaded_reference_videos: list[str] = []
+    for index, (reference_path, reference_duration, reference_fps, _has_audio) in enumerate(reference_video_metadata, start=1):
+        print(
+            f"Normalizing reference video {index}: {reference_path} "
+            f"({reference_duration:.3f}s, {reference_fps:.3f} fps -> 24 fps)"
+        )
+        try:
+            with tempfile.TemporaryDirectory(prefix="h3-reference-video-") as temp_dir:
+                normalized_path = Path(temp_dir) / f"reference-video-{index}.mp4"
+                normalize_h3_reference_video(reference_path, normalized_path)
+                uploaded = upload_file(broker_url, normalized_path, timeout=300)
+        except Exception as exc:
+            print(f"Error preparing reference video {index}: {exc}", file=sys.stderr)
+            return 1
+        uploaded_reference_videos.append(uploaded)
+        print(f"Uploaded as <Video {index}> (paired audio if present): {uploaded}")
+
     # Upload audio if provided
     uploaded_audio: str | None = None
+    input_audio_path: Path | None = None
     if args.audio:
         audio_path = Path(args.audio)
+        input_audio_path = audio_path
         if not audio_path.exists():
             print(f"Input audio not found: {audio_path}", file=sys.stderr)
             return 1
@@ -2281,7 +2619,22 @@ def main() -> int:
             print("--lipsync requires --audio (speech audio)", file=sys.stderr)
             return 1
 
-    # Upload reference audio for ID-LoRA mode
+    # Upload standalone H3 audio references in <Audio N> order.
+    uploaded_h3_reference_audios: list[str] = []
+    paired_video_audio_count = sum(1 for item in reference_video_metadata if item[3])
+    if is_h3:
+        for index, (reference_path, reference_duration) in enumerate(reference_audio_metadata, start=1):
+            print(f"Uploading H3 reference audio {index}: {reference_path} ({reference_duration:.3f}s)")
+            try:
+                uploaded = upload_file(broker_url, reference_path, timeout=300)
+            except Exception as exc:
+                print(f"Error uploading H3 reference audio {index}: {exc}", file=sys.stderr)
+                return 1
+            uploaded_h3_reference_audios.append(uploaded)
+            audio_tag_index = paired_video_audio_count + index
+            print(f"Uploaded as <Audio {audio_tag_index}>: {uploaded}")
+
+    # Upload the single LTX ID-LoRA voice reference.
     uploaded_reference_audio: str | None = None
     id_lora = getattr(args, 'id_lora', False)
     if id_lora:
@@ -2291,7 +2644,7 @@ def main() -> int:
         if not args.reference_audio:
             print("--id-lora requires --reference-audio (5s voice sample)", file=sys.stderr)
             return 1
-        ref_audio_path = Path(args.reference_audio)
+        ref_audio_path = Path(args.reference_audio[0])
         if not ref_audio_path.exists():
             print(f"Reference audio not found: {ref_audio_path}", file=sys.stderr)
             return 1
@@ -2307,8 +2660,13 @@ def main() -> int:
             return 1
 
     if is_h3:
-        if uploaded_reference_images:
-            mode = f"MiniMax H3 reference-to-video ({len(uploaded_reference_images)} images)"
+        if uploaded_reference_images or uploaded_reference_videos or uploaded_h3_reference_audios:
+            audio_mode = "exact" if args.preserve_reference_audio else "semantic"
+            mode = (
+                "MiniMax H3 reference-to-video "
+                f"({len(uploaded_reference_images)} images, {len(uploaded_reference_videos)} videos, "
+                f"{len(uploaded_h3_reference_audios)} {audio_mode} audios)"
+            )
         elif uploaded_image or uploaded_end_image:
             anchors = "+".join(
                 name for name, present in (("first", uploaded_image), ("last", uploaded_end_image)) if present
@@ -2332,8 +2690,14 @@ def main() -> int:
     else:
         neg_prompt = base_negative
 
-    print(f"Steps: {args.steps} | Seed: {seed}" + (f" | Count: {count}" if count > 1 else ""))
+    attention_tag = f" | Attention: {'SageAttention' if args.sage_attention else 'PyTorch'}" if is_h3 else ""
+    print(f"Steps: {args.steps} | Seed: {seed}{attention_tag}" + (f" | Count: {count}" if count > 1 else ""))
 
+    replacement_audio_path = (
+        reference_audio_metadata[0][0]
+        if args.preserve_reference_audio
+        else input_audio_path if lipsync else None
+    )
     errors = []
     for idx in range(count):
         current_seed = seed + idx
@@ -2364,9 +2728,13 @@ def main() -> int:
             id_lora=id_lora,
             reference_audio=uploaded_reference_audio,
             reference_images=uploaded_reference_images,
+            reference_videos=uploaded_reference_videos,
+            h3_reference_audios=uploaded_h3_reference_audios,
             ref_image_size=args.ref_image_size,
+            sage_attention=args.sage_attention,
+            preserve_reference_audio=args.preserve_reference_audio,
             identity_guidance_scale=args.identity_guidance_scale,
-            original_audio_path=audio_path if lipsync else None,
+            original_audio_path=replacement_audio_path,
             negative_prompt=neg_prompt,
         )
         if err:

@@ -30,7 +30,7 @@ project/
 4. Include reference images from source (e.g., web illustrations)
 
 ### Phase 3: Video Generation
-1. Image-to-video via `generate_video.py` with `--image --audio --lipsync`
+1. Image-to-video via `generate_video.py --engine ltx23` with `--image --audio --lipsync`
 2. Each clip uses the corresponding TTS audio
 3. Verify Whisper coverage on final video audio
 

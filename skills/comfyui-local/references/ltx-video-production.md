@@ -31,6 +31,7 @@ uv run scripts/generate_image.py \
 
 ```bash
 uv run scripts/generate_video.py \
+  --engine ltx23 \
   --image "first-frame.png" \
   --prompt "Motion description + Speaking in Spanish with clear Spanish accent, saying: 'EXACT DIALOGUE HERE'" \
   --filename "output.mp4" \
