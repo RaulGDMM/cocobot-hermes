@@ -1,4 +1,9 @@
 # Hermes Agent Startup Script
+# Uso:
+#   .\start-hermes.ps1            -> arranca todo (llama-server + gateway + broker + ...)
+#   .\start-hermes.ps1 -LlamaOnly -> SOLO llama-server con el perfil seleccionado
+param([switch]$LlamaOnly)
+
 # ---- CONFIGURACION ----
 # Instalacion de llama.cpp: "stable" (mainline), "latest" (pruebas), "ik_llama" (fork con KV Q6_0 y MTP), "beellama" (DFlash + TurboQuant)
 # ik_llama: KV Q6_0 (Hadamard rotations) para mas ctx, pero NO tiene --kv-unified asi que
@@ -31,13 +36,17 @@ if (-not $env:WT_SESSION) {
     $wtExe = Get-Command wt.exe -ErrorAction SilentlyContinue
     if ($wtExe) {
         $scriptPath = $MyInvocation.MyCommand.Path
-        wt.exe new-tab --title "Hermes Startup" -- powershell.exe -ExecutionPolicy Bypass -NoExit -File $scriptPath
+        $relaunchTitle = if ($LlamaOnly) { "Solo llama-server" } else { "Hermes Startup" }
+        $extraArgs = @()
+        if ($LlamaOnly) { $extraArgs = @("-LlamaOnly") }
+        wt.exe new-tab --title $relaunchTitle -- powershell.exe -ExecutionPolicy Bypass -NoExit -File $scriptPath @extraArgs
         exit
     }
 }
 
 Write-Host "========================================" -ForegroundColor Magenta
-Write-Host "  Hermes Agent Startup Script" -ForegroundColor Magenta
+$bannerTitle = if ($LlamaOnly) { "  Solo llama-server" } else { "  Hermes Agent Startup Script" }
+Write-Host $bannerTitle -ForegroundColor Magenta
 Write-Host "========================================" -ForegroundColor Magenta
 Write-Host "  Modelo: $useModel" -ForegroundColor Gray
 Write-Host "  llama.cpp: $useLlamaInstall" -ForegroundColor Gray
@@ -449,6 +458,66 @@ else {
     }
 }
 Write-Host ""
+
+# -LlamaOnly: detenernos aqui. El resto (gateway, desktop backend, broker,
+# WebUI, port proxies...) no se toca.
+if ($LlamaOnly) {
+    if ($llamaNeedsWarmup) {
+        Write-Host "  Esperando a que llama-server cargue el modelo..." -ForegroundColor Yellow
+        $maxWait = 300
+        $waited = 0
+        $llamaReady = $false
+        while ($waited -lt $maxWait) {
+            Start-Sleep -Seconds 3
+            $waited += 3
+            try {
+                $null = Invoke-RestMethod -Uri "http://localhost:${llamaPort}/health" -Method Get -TimeoutSec 3 -ErrorAction Stop
+                $llamaReady = $true
+                break
+            } catch {}
+            if ($waited % 15 -eq 0) {
+                Write-Host "  Cargando modelo... ($waited s)" -ForegroundColor Gray
+            }
+        }
+        if (-not $llamaReady) {
+            Write-Host "[!] llama-server no ha respondido en $maxWait s; revisa el log: $llamaLogFile" -ForegroundColor Yellow
+        }
+        else {
+            Invoke-LlamaWarmup -Port $llamaPort
+        }
+    }
+    else {
+        # Server ya corria antes de lanzar: verificar que sea del perfil seleccionado.
+        # /v1/models devuelve id=alias principal; el perfil va en .aliases.
+        $mismatch = $false
+        $runningIds = @()
+        try {
+            $models = Invoke-RestMethod -Uri "http://localhost:${llamaPort}/v1/models" -Method Get -TimeoutSec 10
+            $runningIds = @($models.data | ForEach-Object { @($_.id); @($_.aliases) } | Where-Object { $_ })
+            $mismatch = -not ($useModel -in $runningIds)
+        } catch {
+            Write-Host "  [!] No se pudo consultar /v1/models para verificar el perfil" -ForegroundColor Yellow
+        }
+        if ($mismatch) {
+            Write-Host "[!] El llama-server corriendo en :$llamaPort NO es el perfil seleccionado" -ForegroundColor Yellow
+            Write-Host "    Corriendo: $($runningIds -join ', ')" -ForegroundColor Yellow
+            Write-Host "    Pedido:   $useModel" -ForegroundColor Yellow
+            Write-Host "    Para usar el perfil correcto: Stop-Process -Name llama-server -Force" -ForegroundColor Yellow
+            Write-Host "    y reejecuta este acceso directo." -ForegroundColor Yellow
+        }
+        else {
+            Write-Host "[OK] El llama-server corriendo ya es el perfil seleccionado ($useModel)" -ForegroundColor Green
+        }
+    }
+    Write-Host ""
+    Write-Host "========================================" -ForegroundColor Magenta
+    Write-Host "  Solo llama-server" -ForegroundColor Magenta
+    Write-Host "  http://localhost:$llamaPort  ($modelLabel)" -ForegroundColor Gray
+    Write-Host "  Para detenerlo: Stop-Process -Name llama-server -Force" -ForegroundColor Gray
+    Write-Host "========================================" -ForegroundColor Magenta
+    Write-Host ""
+    [Environment]::Exit(0)
+}
 
 # Auto-patch: fix preflight token estimation for images (base64 over-count bug)
 $patchFile = "/root/.hermes/hermes-agent/agent/model_metadata.py"
