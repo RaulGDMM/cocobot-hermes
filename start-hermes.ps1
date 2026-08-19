@@ -340,9 +340,15 @@ else {
             $llamaArgs += @("--min-p", $env:OPENCLAW_LLAMA_MIN_P)
             $llamaArgs += @("--predict", $env:OPENCLAW_LLAMA_PREDICT)
             $llamaArgs += @("--temp", $env:OPENCLAW_LLAMA_TEMP, "--top-p", $env:OPENCLAW_LLAMA_TOP_P, "--top-k", $env:OPENCLAW_LLAMA_TOP_K)
-            $chatTemplateKwargs = if ($useModel -in @("qwen38_27b_unsloth_q6k_mtp","qwen38_27b_nvfp4_q8attn_mtp")) { '{"enable_thinking":true,"preserve_thinking":true,"reasoning_effort":"xhigh"}' } else { '{"preserve_thinking":true,"tool_call_format":"xml"}' }
-            $env:LLAMA_CHAT_TEMPLATE_KWARGS = $chatTemplateKwargs
-            $llamaLaunchEnv["LLAMA_CHAT_TEMPLATE_KWARGS"] = $chatTemplateKwargs
+            # 2026-08-19: llama.cpp solo respeta la env LLAMA_ARG_CHAT_TEMPLATE_KWARGS
+            # (la variable vieja LLAMA_CHAT_TEMPLATE_KWARGS sin _ARG era ignorada y el
+            # server quedaba en el default de la plantilla, xhigh). El flag CLI
+            # --chat-template-kwargs va en la linea de comandos (cubre ambos modos
+            # de arranque: tab de wt y Start-Process). Default qwen38: medium.
+            $chatTemplateKwargs = if ($useModel -in @("qwen38_27b_unsloth_q6k_mtp","qwen38_27b_nvfp4_q8attn_mtp")) { '{"enable_thinking":true,"preserve_thinking":true,"reasoning_effort":"medium"}' } else { '{"preserve_thinking":true,"tool_call_format":"xml"}' }
+            $env:LLAMA_ARG_CHAT_TEMPLATE_KWARGS = $chatTemplateKwargs
+            $llamaLaunchEnv["LLAMA_ARG_CHAT_TEMPLATE_KWARGS"] = $chatTemplateKwargs
+            $llamaArgs += @("--chat-template-kwargs", $chatTemplateKwargs)
             $llamaArgs += @("--no-prefill-assistant")
             # MTP keeps draft state per slot, breaking ik_llama's KV unification.
             # Force parallel=1 when MTP active on ik_llama to avoid KV exhaustion.

@@ -958,11 +958,20 @@ class BrokerState:
             args.extend(["--log-file", str(self.config.llama_log_file)])
 
         # Environment variables needed by specific profiles
+        # 2026-08-19: llama.cpp solo respeta LLAMA_ARG_CHAT_TEMPLATE_KWARGS (la variable
+        # vieja LLAMA_CHAT_TEMPLATE_KWARGS sin _ARG era ignorada -> el server quedaba en
+        # el default de la plantilla, xhigh). Se añade el flag CLI --chat-template-kwargs
+        # para que sea visible en la linea de comandos. Default qwen38: medium.
         extra_env: dict[str, str] = {}
         if profile in ("qwen38_27b_unsloth_q6k_mtp", "qwen38_27b_nvfp4_q8attn_mtp"):
-            extra_env["LLAMA_CHAT_TEMPLATE_KWARGS"] = '{"enable_thinking":true,"preserve_thinking":true,"reasoning_effort":"xhigh"}'
+            _chat_template_kwargs = '{"enable_thinking":true,"preserve_thinking":true,"reasoning_effort":"medium"}'
         elif profile in ("qwen36", "qwen36q4", "qwen36_27b_bee_q5", "qwen36_27b_bee_q6", "qwen36_27b", "qwen36_27b_q6", "qwen36_27b_q4_mtp", "qwen36_27b_q5_mtp", "qwen36_27b_q6_mtp", "qwen36_27b_autoround_q6_mtp", "qwen36_27b_bartowski_q6kl_mtp"):
-            extra_env["LLAMA_CHAT_TEMPLATE_KWARGS"] = '{"preserve_thinking":true,"tool_call_format":"xml"}'
+            _chat_template_kwargs = '{"preserve_thinking":true,"tool_call_format":"xml"}'
+        else:
+            _chat_template_kwargs = None
+        if _chat_template_kwargs:
+            args.extend(["--chat-template-kwargs", _chat_template_kwargs])
+            extra_env["LLAMA_ARG_CHAT_TEMPLATE_KWARGS"] = _chat_template_kwargs
         if profile in ("qwen36_27b_bee_q5", "qwen36_27b_bee_q6"):
             extra_env.update(
                 {
