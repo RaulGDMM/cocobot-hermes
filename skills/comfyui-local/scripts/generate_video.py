@@ -2,11 +2,12 @@
 # /// script
 # requires-python = ">=3.10"
 # ///
-"""Generate videos locally through the ComfyUI broker (MiniMax H3 or LTX 2.3)."""
+"""Generate videos locally through the ComfyUI broker (MiniMax H3, LTX 2.5 or LTX 2.3)."""
 
 from __future__ import annotations
 
 import argparse
+import itertools
 import json
 import os
 import shutil
@@ -26,6 +27,20 @@ DEFAULT_FPS = 24
 DEFAULT_STEPS = 20
 DEFAULT_ENGINE = "minimax-h3"
 
+# --- MiniMax H3 PDD Acc (Parallel Decoding Distillation) — default since 2026-08-31 ---
+# Official Alibaba PAI 8-step Acc LoRAs (alibaba-pai/MiniMax-H3-Acc-LoRAs) + node pack
+# ComfyUI-MiniMax-H3-PDD-Acc (custom_nodes). A/B-validated on 2026-08-31:
+#   - 5s FL2VA 480p: 58.7s -> 35.9s (1.63x), no visible degradation
+#   - 15s Ref2VA 720p 3 refs: 914s -> 410s (2.23x), no visible degradation
+# Recipe (fail-closed, the node rejects anything else): 4/6/8 steps, euler,
+# CFG 1.0, lora_strength 1.0, sigma shift video=12 audio=3. Never stack with
+# turbo/few-step LoRAs or step-cache. Use --no-pdd for the classic 20-step mode.
+H3_PDD_LORA_FL2VA = "MiniMax-H3-FL2VA-Acc-8Step.safetensors"
+H3_PDD_LORA_REF2VA = "MiniMax-H3-Ref2VA-Acc-8Step.safetensors"
+H3_PDD_STEPS = 8
+H3_PDD_SHIFT_VIDEO = 12.0
+H3_PDD_SHIFT_AUDIO = 3.0
+
 NEGATIVE_PROMPT = (
     "blurry, low quality, still frame, frames, watermark, "
     "overlay, titles, has blurbox, has subtitles"
@@ -44,6 +59,58 @@ H3_MODEL_REF2VA = "minimax_h3_ref2va_pruned_int8_convrot.safetensors"
 H3_TEXT_ENCODER = "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors"
 H3_VIDEO_VAE = "minimax_h3_video_vae_fp16.safetensors"
 H3_AUDIO_VAE = "minimax_h3_audio_vae_fp32.safetensors"
+
+# LTX 2.5 distilled (22B int8) — official two-stage pipeline from the Comfy-Org
+# templates (video_ltx2_5_{t2v,i2v,flf2v}):
+#   stage 1: half-resolution latent + 9-sigma distilled schedule (8 steps)
+#   bridge:  LTXVLatentUpsampler x2 (spatial)
+#   stage 2: full-resolution + 4-sigma refinement schedule (3 steps)
+# DualCFG guider at video_cfg=1.0 / audio_cfg=1.0, euler_ancestral sampler.
+# The model co-generates an audio track (decoupled: empty audio latent for t2v,
+# encoded audio for --audio conditioning). FlF2V runs a single full-res stage
+# with LTXVAddGuide keyframes at frames 0 and -1 (strength 0.7).
+LTX25_TRANSFORMER = "ltx-2.5-22b-distilled-transformer-comfy-int8-convrot.safetensors"
+LTX25_TEXT_ENCODER = "gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot.safetensors"
+LTX25_VIDEO_VAE = "ltx-2.5-video-vae-bf16.safetensors"
+LTX25_AUDIO_VAE = "ltx-2.5-audio-vae-bf16.safetensors"
+LTX25_LATENT_UPSCALER = "ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors"
+LTX25_FPS = 24
+LTX25_SIGMAS_STAGE1 = "1.0, 0.99375, 0.9875, 0.98125, 0.975, 0.909375, 0.725, 0.421875, 0.0"
+LTX25_SIGMAS_STAGE2 = "0.85, 0.7250, 0.4219, 0.0"
+LTX25_IMAGE_CONDITIONING_STRENGTH = 0.7  # first/last keyframe strength (official templates)
+# LTX 2.5 stages from half resolution through a 32x VAE, so the final
+# dimensions must be multiples of 64 (halves must be multiples of 32) to
+# avoid a silent snap. These presets are the closest grid-friendly sizes.
+LTX25_VIDEO_PRESETS = {
+    "480p-16:9": (896, 512),
+    "480p-4:3": (512, 384),
+    "480p-1:1": (512, 512),
+    "480p-9:16": (512, 896),
+    "480p-3:4": (384, 512),
+    "720p-16:9": (1344, 768),
+    "720p-4:3": (768, 576),
+    "720p-1:1": (768, 768),
+    "720p-9:16": (768, 1344),
+    "720p-3:4": (576, 768),
+    "1080p-16:9": (1920, 1088),
+    "1080p-4:3": (1280, 960),
+    "1080p-1:1": (1088, 1088),
+    "1080p-9:16": (1088, 1920),
+    "1080p-3:4": (960, 1280),
+}
+LTX25_NEGATIVE_PROMPT = (
+    "blurry, out of focus, overexposed, underexposed, low contrast, washed out colors, excessive noise, "
+    "grainy texture, poor lighting, flickering, motion blur, distorted proportions, unnatural skin tones, "
+    "deformed facial features, asymmetrical face, missing facial features, extra limbs, disfigured hands, "
+    "wrong hand count, artifacts around text, inconsistent perspective, camera shake, incorrect depth of "
+    "field, background too sharp, background clutter, distracting reflections, harsh shadows, inconsistent "
+    "lighting direction, color banding, cartoonish rendering, 3D CGI look, unrealistic materials, uncanny "
+    "valley effect, incorrect ethnicity, wrong gender, exaggerated expressions, wrong gaze direction, "
+    "mismatched lip sync, silent or muted audio, distorted voice, robotic voice, echo, background noise, "
+    "off-sync audio, incorrect dialogue, added dialogue, repetitive speech, jittery movement, awkward "
+    "pauses, incorrect timing, unnatural transitions, inconsistent framing, tilted camera, flat lighting, "
+    "inconsistent tone, cinematic oversaturation, stylized filters, or AI artifacts."
+)
 
 # ID-LoRA pipeline (matches the official "video_ltx2_3_id_lora" template):
 # uses the FP8 checkpoint + the v1.0 distilled LoRA at 0.5 strength stacked
@@ -107,6 +174,227 @@ def h3_duration_to_frames(seconds: float) -> int:
     """Convert seconds to MiniMax H3's 17k+5 frame grid at fixed 24 fps."""
     raw = max(5, round(seconds * 24))
     return raw + (5 - raw % 17) % 17
+
+
+# ---------------------------------------------------------------------------
+# LTX 2.5 workflow (t2v / i2v / flf2v) — official distilled two-stage pipeline
+# ---------------------------------------------------------------------------
+
+def build_ltx25_workflow(
+    *,
+    prompt: str,
+    filename_prefix: str,
+    width: int,
+    height: int,
+    frames: int,
+    fps: int,
+    seed: int,
+    input_image: str | None = None,
+    input_end_image: str | None = None,
+    input_audio: str | None = None,
+    negative_prompt: str = LTX25_NEGATIVE_PROMPT,
+) -> dict[str, object]:
+    """Build an LTX 2.5 distilled workflow (API format).
+
+    Mirrors the official Comfy-Org templates:
+      t2v  : stage 1 at half resolution (8-step distilled schedule) ->
+             LTXVLatentUpsampler x2 -> stage 2 (3-step refinement)
+      i2v  : same, first frame anchored in stage 1 (strength 0.7) and
+             re-anchored at full resolution in stage 2 (strength 1.0)
+      flf2v: single full-resolution stage (8 steps) with LTXVAddGuide
+             keyframes at frames 0 and -1 (strength 0.7) + LTXVCropGuides
+
+    DualCFG guider at video_cfg=1.0 / audio_cfg=1.0 (distilled, no CFG),
+    euler_ancestral sampler, fixed sigma schedules. The model co-generates
+    an audio track; --audio conditions it from an external file instead.
+    """
+    nodes: dict[str, object] = {
+        # --- model loaders ---
+        "1": {"class_type": "UNETLoader", "inputs": {"unet_name": LTX25_TRANSFORMER, "weight_dtype": "default"}},
+        "2": {"class_type": "VAELoader", "inputs": {"vae_name": LTX25_VIDEO_VAE}},
+        "3": {"class_type": "VAELoader", "inputs": {"vae_name": LTX25_AUDIO_VAE}},
+        "4": {"class_type": "CLIPLoader", "inputs": {"clip_name": LTX25_TEXT_ENCODER, "type": "ltxv"}},
+        # --- prompt conditioning ---
+        "5": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["4", 0], "text": prompt}},
+        "6": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["4", 0], "text": negative_prompt}},
+        "7": {"class_type": "LTXVConditioning", "inputs": {
+            "positive": ["5", 0], "negative": ["6", 0], "frame_rate": fps,
+        }},
+    }
+
+    # --- keyframe images (official templates apply light JPEG compression
+    # so the model treats the keyframe as photographic input) ---
+    start_prep: str | None = None
+    end_prep: str | None = None
+    if input_image:
+        nodes["8"] = {"class_type": "LoadImage", "inputs": {"image": input_image}}
+        nodes["9"] = {"class_type": "LTXVPreprocess", "inputs": {"image": ["8", 0], "img_compression": 18}}
+        start_prep = "9"
+    if input_end_image:
+        nodes["10"] = {"class_type": "LoadImage", "inputs": {"image": input_end_image}}
+        nodes["11"] = {"class_type": "LTXVPreprocess", "inputs": {"image": ["10", 0], "img_compression": 18}}
+        end_prep = "11"
+
+    # --- audio latent: co-generated (empty) or conditioned from --audio ---
+    if input_audio:
+        nodes["12"] = {"class_type": "LoadAudio", "inputs": {"audio": input_audio}}
+        audio_latent = ["13", 0]
+        nodes["13"] = {"class_type": "LTXVAudioVAEEncode", "inputs": {
+            "audio": ["12", 0], "audio_vae": ["3", 0],
+        }}
+    else:
+        nodes["13"] = {"class_type": "LTXVEmptyLatentAudio", "inputs": {
+            "audio_vae": ["3", 0], "frames_number": frames, "frame_rate": fps, "batch_size": 1,
+        }}
+        audio_latent = ["13", 0]
+
+    nodes["14"] = {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "euler_ancestral"}}
+
+    counter = itertools.count(15)
+
+    def nid() -> str:
+        return str(next(counter))
+
+    def guider(src_pos: list, src_neg: list) -> str:
+        g = nid()
+        nodes[g] = {"class_type": "LTXVDualCFGGuider", "inputs": {
+            "model": ["1", 0], "positive": src_pos, "negative": src_neg,
+            "video_cfg": 1.0, "audio_cfg": 1.0,
+        }}
+        return g
+
+    def sampler(noise: str, sigmas: str, latent: list, guid: str) -> str:
+        s = nid()
+        nodes[s] = {"class_type": "SamplerCustomAdvanced", "inputs": {
+            "noise": [noise, 0], "guider": [guid, 0], "sampler": ["14", 0],
+            "sigmas": [sigmas, 0], "latent_image": latent,
+        }}
+        return s
+
+    def noise_node(seed_value: int, mode: str) -> str:
+        del mode  # API format only carries noise_seed (proven V2V run)
+        n = nid()
+        nodes[n] = {"class_type": "RandomNoise", "inputs": {"noise_seed": seed_value}}
+        return n
+
+    pos_src: list = ["7", 0]
+    neg_src: list = ["7", 1]
+    mode = "flf2v" if (start_prep and end_prep) else ("i2v" if start_prep else "t2v")
+
+    if mode == "flf2v":
+        # Single full-resolution stage, keyframes added as latent guides.
+        video_latent = nid()
+        nodes[video_latent] = {"class_type": "EmptyLTXVLatentVideo", "inputs": {
+            "width": width, "height": height, "length": frames, "batch_size": 1,
+        }}
+        latent_src: list = [video_latent, 0]
+        for image_node, frame_idx in ((start_prep, 0), (end_prep, -1)):
+            guide = nid()
+            nodes[guide] = {"class_type": "LTXVAddGuide", "inputs": {
+                "positive": pos_src, "negative": neg_src, "vae": ["2", 0],
+                "latent": latent_src, "image": [image_node, 0],
+                "frame_idx": frame_idx, "strength": LTX25_IMAGE_CONDITIONING_STRENGTH,
+            }}
+            pos_src = [guide, 0]
+            neg_src = [guide, 1]
+            latent_src = [guide, 2]
+
+        av = nid()
+        nodes[av] = {"class_type": "LTXVConcatAVLatent", "inputs": {
+            "video_latent": latent_src, "audio_latent": audio_latent,
+        }}
+        sigmas = nid()
+        nodes[sigmas] = {"class_type": "ManualSigmas", "inputs": {"sigmas": LTX25_SIGMAS_STAGE1}}
+        sampled = sampler(noise_node(seed, "randomize"), sigmas, [av, 0], guider(pos_src, neg_src))
+        sep = nid()
+        nodes[sep] = {"class_type": "LTXVSeparateAVLatent", "inputs": {"av_latent": [sampled, 0]}}
+        crop = nid()
+        nodes[crop] = {"class_type": "LTXVCropGuides", "inputs": {
+            "positive": pos_src, "negative": neg_src, "latent": [sep, 0],
+        }}
+        video_out: list = [crop, 2]
+        audio_out: list = [sep, 1]
+    else:
+        # Stage 1: half-resolution latent.
+        half = nid()
+        nodes[half] = {"class_type": "EmptyLTXVLatentVideo", "inputs": {
+            "width": width // 2, "height": height // 2, "length": frames, "batch_size": 1,
+        }}
+        if mode == "i2v":
+            anchor = nid()
+            nodes[anchor] = {"class_type": "LTXVImgToVideoInplace", "inputs": {
+                "vae": ["2", 0], "image": [start_prep, 0], "latent": [half, 0],
+                "strength": LTX25_IMAGE_CONDITIONING_STRENGTH, "bypass": False,
+            }}
+            video1: list = [anchor, 0]
+        else:
+            video1 = [half, 0]
+
+        av1 = nid()
+        nodes[av1] = {"class_type": "LTXVConcatAVLatent", "inputs": {
+            "video_latent": video1, "audio_latent": audio_latent,
+        }}
+        sigmas1 = nid()
+        nodes[sigmas1] = {"class_type": "ManualSigmas", "inputs": {"sigmas": LTX25_SIGMAS_STAGE1}}
+        sampled1 = sampler(noise_node(seed, "randomize"), sigmas1, [av1, 0], guider(["7", 0], ["7", 1]))
+        sep1 = nid()
+        nodes[sep1] = {"class_type": "LTXVSeparateAVLatent", "inputs": {"av_latent": [sampled1, 0]}}
+
+        # Bridge: spatial latent upscale x2 (video only, audio passes through).
+        upm = nid()
+        nodes[upm] = {"class_type": "LatentUpscaleModelLoader", "inputs": {"model_name": LTX25_LATENT_UPSCALER}}
+        up = nid()
+        nodes[up] = {"class_type": "LTXVLatentUpsampler", "inputs": {
+            "samples": [sep1, 0], "upscale_model": [upm, 0], "vae": ["2", 0],
+        }}
+
+        # Stage 2: full-resolution refinement (fixed seed, official template).
+        if mode == "i2v":
+            anchor2 = nid()
+            nodes[anchor2] = {"class_type": "LTXVImgToVideoInplace", "inputs": {
+                "vae": ["2", 0], "image": [start_prep, 0], "latent": [up, 0],
+                "strength": 1.0, "bypass": False,
+            }}
+            video2: list = [anchor2, 0]
+        else:
+            video2 = [up, 0]
+
+        av2 = nid()
+        nodes[av2] = {"class_type": "LTXVConcatAVLatent", "inputs": {
+            "video_latent": video2, "audio_latent": [sep1, 1],
+        }}
+        sigmas2 = nid()
+        nodes[sigmas2] = {"class_type": "ManualSigmas", "inputs": {"sigmas": LTX25_SIGMAS_STAGE2}}
+        sampled2 = sampler(noise_node(42, "fixed"), sigmas2, [av2, 0], guider(["7", 0], ["7", 1]))
+        sep2 = nid()
+        nodes[sep2] = {"class_type": "LTXVSeparateAVLatent", "inputs": {"av_latent": [sampled2, 0]}}
+        video_out = [sep2, 0]
+        audio_out = [sep2, 1]
+
+    # --- decode + mux ---
+    decode = nid()
+    nodes[decode] = {"class_type": "VAEDecodeTiled", "inputs": {
+        "samples": video_out, "vae": ["2", 0],
+        "tile_size": 512, "overlap": 64, "temporal_size": 64, "temporal_overlap": 16,
+    }}
+    audio_decode = nid()
+    nodes[audio_decode] = {"class_type": "LTXVAudioVAEDecode", "inputs": {
+        "samples": audio_out, "audio_vae": ["3", 0],
+    }}
+    out = nid()
+    nodes[out] = {"class_type": "VHS_VideoCombine", "inputs": {
+        "images": [decode, 0],
+        "frame_rate": fps,
+        "loop_count": 0,
+        "filename_prefix": filename_prefix,
+        "format": "video/h264-mp4",
+        "pix_fmt": "yuv420p",
+        "crf": 17,
+        "pingpong": False,
+        "save_output": True,
+        "audio": [audio_decode, 0],
+    }}
+    return nodes
 
 
 # ---------------------------------------------------------------------------
@@ -1634,8 +1922,14 @@ def build_h3_workflow(
     reference_audios: list[str] | None = None,
     ref_image_size: str = "match",
     sage_attention: bool = True,
+    pdd: bool = True,
 ) -> dict[str, object]:
-    """Build a native MiniMax H3 ComfyUI workflow in API format."""
+    """Build a native MiniMax H3 ComfyUI workflow in API format.
+
+    pdd=True (default since 2026-08-31): Parallel Decoding Distillation 8-step
+    sampler via the ComfyUI-MiniMax-H3-PDD-Acc node pack (sigma shift 12/3,
+    euler, lora strength 1.0). pdd=False: classic BasicScheduler + res_multistep.
+    """
     image_references = reference_images or []
     video_references = reference_videos or []
     audio_references = reference_audios or []
@@ -1653,6 +1947,11 @@ def build_h3_workflow(
 
     model_name = H3_MODEL_REF2VA if has_references else H3_MODEL_FL2VA
     model_source = ["15", 0] if sage_attention else ["1", 0]
+    # PDD: the guider consumes the LoRA-patched model from the Apply node (slot 0)
+    # and the sampler consumes the trained sigmas (slot 1). Without PDD both come
+    # straight from the base model chain + BasicScheduler.
+    guider_model = ["30", 0] if pdd else model_source
+    scheduler_sigmas = ["30", 1] if pdd else ["7", 0]
     conditioning_inputs: dict[str, object] = {
         "clip": ["2", 0],
         "vae": ["3", 0],
@@ -1752,24 +2051,36 @@ def build_h3_workflow(
             },
             "6": {
                 "class_type": "BasicGuider",
-                "inputs": {"model": model_source, "conditioning": ["5", 0]},
+                "inputs": {"model": guider_model, "conditioning": ["5", 0]},
             },
-            "7": {
-                "class_type": "BasicScheduler",
-                "inputs": {
-                    "model": model_source,
-                    "scheduler": "simple",
-                    "steps": steps,
-                    "denoise": 1.0,
-                },
-            },
+            "7": (
+                {
+                    "class_type": "BasicScheduler",
+                    "inputs": {
+                        "model": model_source,
+                        "scheduler": "simple",
+                        "steps": steps,
+                        "denoise": 1.0,
+                    },
+                }
+                if not pdd
+                else {
+                    # PDD: trained sigma schedule from the Apply node (not BasicScheduler).
+                    "class_type": "MiniMaxH3SigmaShift",
+                    "inputs": {
+                        "model": model_source,
+                        "shift_video": H3_PDD_SHIFT_VIDEO,
+                        "shift_audio": H3_PDD_SHIFT_AUDIO,
+                    },
+                }
+            ),
             "8": {
                 "class_type": "RandomNoise",
                 "inputs": {"noise_seed": seed, "control_after_generate": "fixed"},
             },
             "9": {
                 "class_type": "KSamplerSelect",
-                "inputs": {"sampler_name": "res_multistep"},
+                "inputs": {"sampler_name": "euler" if pdd else "res_multistep"},
             },
             "10": {
                 "class_type": "SamplerCustomAdvanced",
@@ -1777,10 +2088,28 @@ def build_h3_workflow(
                     "noise": ["8", 0],
                     "guider": ["6", 0],
                     "sampler": ["9", 0],
-                    "sigmas": ["7", 0],
+                    "sigmas": scheduler_sigmas,
                     "latent_image": ["5", 1],
                 },
             },
+            **({
+                # PDD 8-step acceleration (default). Model chain ends in the Apply
+                # node which emits both the patched model (slot 0) and the trained
+                # sigmas (slot 1). LoRA auto-selected per model (ref2va vs fl2va).
+                "30": {
+                    "class_type": "MiniMaxH3PDDAccApply",
+                    "inputs": {
+                        "model": ["7", 0],
+                        "pdd_file": (
+                            H3_PDD_LORA_REF2VA if has_references else H3_PDD_LORA_FL2VA
+                        ),
+                        "nfe": str(H3_PDD_STEPS),
+                        "lora_strength": 1.0,
+                        "head_strength": 1.0,
+                        "on_off_grid": "error",
+                    },
+                }
+            } if pdd else {}),
             "11": {
                 "class_type": "VAEDecode",
                 "inputs": {"samples": ["10", 0], "vae": ["3", 0]},
@@ -2115,6 +2444,7 @@ def generate_video(
     h3_reference_audios: list[str] | None = None,
     ref_image_size: str = "match",
     sage_attention: bool = True,
+    pdd: bool = True,
     preserve_reference_audio: bool = False,
     identity_guidance_scale: float = 3.0,
     original_audio_path: Path | None = None,
@@ -2124,7 +2454,28 @@ def generate_video(
     prefix = f"openclaw-local-output_{output_path.stem}-{seed}"
 
     audio_tag = "+audio" if input_audio else ""
-    if engine == "minimax-h3":
+    if engine == "ltx25":
+        workflow = build_ltx25_workflow(
+            prompt=prompt,
+            filename_prefix=prefix,
+            width=width,
+            height=height,
+            frames=frames,
+            fps=fps,
+            seed=seed,
+            input_image=input_image,
+            input_end_image=input_end_image,
+            input_audio=input_audio,
+            negative_prompt=negative_prompt,
+        )
+        if input_image and input_end_image:
+            mode_tag = "flf2v"
+        elif input_image:
+            mode_tag = "i2v"
+        else:
+            mode_tag = "t2v"
+        label = f"ltx25-{mode_tag}{audio_tag} (distilled 2-stage), seed={seed}, {width}x{height}, {frames}f"
+    elif engine == "minimax-h3":
         workflow = build_h3_workflow(
             prompt=prompt,
             filename_prefix=prefix,
@@ -2140,21 +2491,23 @@ def generate_video(
             reference_audios=h3_reference_audios,
             ref_image_size=ref_image_size,
             sage_attention=sage_attention,
+            pdd=pdd,
         )
         sage_tag = "+sage" if sage_attention else "+pytorch-attention"
+        pdd_tag = "+pdd8" if pdd else "+20step"
         if reference_images or reference_videos or h3_reference_audios:
             image_count = len(reference_images or [])
             video_count = len(reference_videos or [])
             audio_count = len(h3_reference_audios or [])
             audio_mode = "+exact-audio" if preserve_reference_audio else "+semantic-audio" if audio_count else ""
-            label = f"h3-r2v{sage_tag}{audio_mode} ({image_count} images, {video_count} videos, {audio_count} audios), seed={seed}, {width}x{height}, {frames}f"
+            label = f"h3-r2v{sage_tag}{pdd_tag}{audio_mode} ({image_count} images, {video_count} videos, {audio_count} audios), seed={seed}, {width}x{height}, {frames}f"
         elif input_image or input_end_image:
             keyframes = "+".join(
                 name for name, present in (("first", input_image), ("last", input_end_image)) if present
             )
-            label = f"h3-i2v{sage_tag} ({keyframes}), seed={seed}, {width}x{height}, {frames}f"
+            label = f"h3-i2v{sage_tag}{pdd_tag} ({keyframes}), seed={seed}, {width}x{height}, {frames}f"
         else:
-            label = f"h3-t2v{sage_tag}, seed={seed}, {width}x{height}, {frames}f"
+            label = f"h3-t2v{sage_tag}{pdd_tag}, seed={seed}, {width}x{height}, {frames}f"
     elif id_lora and input_image and reference_audio:
         workflow = build_idlora_workflow(
             prompt=prompt,
@@ -2283,11 +2636,11 @@ def generate_video(
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Generate videos locally through the ComfyUI broker (MiniMax H3 or LTX 2.3)"
+        description="Generate videos locally through the ComfyUI broker (MiniMax H3, LTX 2.5 or LTX 2.3)"
     )
     parser.add_argument(
         "--engine",
-        choices=["ltx23", "minimax-h3"],
+        choices=["ltx23", "ltx25", "minimax-h3"],
         default=DEFAULT_ENGINE,
         help=f"Generation engine (default: {DEFAULT_ENGINE})",
     )
@@ -2357,6 +2710,12 @@ def main() -> int:
         default=True,
         help="Use the MiniMax H3-specific SageAttention patch (default: enabled; use --no-sage-attention for an A/B baseline)",
     )
+    parser.add_argument(
+        "--pdd",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="MiniMax H3 PDD Acc 8-step acceleration (default: enabled; use --no-pdd for the classic 20-step mode)",
+    )
     parser.add_argument("--seed", type=int, default=None, help="Seed for reproducibility")
     parser.add_argument("--count", "-n", type=int, default=1, help="Number of videos to generate (each with different seed)")
     parser.add_argument("--negative-prompt", default=None, help="Negative prompt (what to avoid). Appended to built-in negatives unless prefixed with !")
@@ -2365,6 +2724,22 @@ def main() -> int:
     args = parser.parse_args()
 
     is_h3 = args.engine == "minimax-h3"
+    is_ltx25 = args.engine == "ltx25"
+    if is_ltx25:
+        unsupported = [
+            name
+            for name, on in (("--lipsync", args.lipsync), ("--id-lora", args.id_lora))
+            if on
+        ]
+        if unsupported:
+            print(
+                f"LTX 2.5 does not support these LTX 2.3 options: {', '.join(unsupported)}",
+                file=sys.stderr,
+            )
+            return 1
+        if args.fps is not None and args.fps != LTX25_FPS:
+            print(f"LTX 2.5 runs at a fixed {LTX25_FPS} fps", file=sys.stderr)
+            return 1
     if is_h3:
         incompatible = []
         if args.lipsync:
@@ -2402,6 +2777,20 @@ def main() -> int:
         if args.fps is not None and args.fps != 24:
             print("MiniMax H3 runs at a fixed 24 fps", file=sys.stderr)
             return 1
+        if args.pdd:
+            # PDD Acc recipe is fail-closed: the node only works with 4/6/8 steps.
+            # 20 is the classic default; with PDD on we transparently snap it to
+            # the PDD grid — that IS the "8 steps by default" behaviour. Anything
+            # else is rejected (use --no-pdd for the classic 20-step mode).
+            if args.steps == 20:
+                args.steps = H3_PDD_STEPS
+            elif args.steps not in (4, 6, 8):
+                print(
+                    f"--pdd requires --steps 4, 6 or 8 (got {args.steps}); "
+                    "use --no-pdd for the classic 20-step mode",
+                    file=sys.stderr,
+                )
+                return 1
     else:
         if args.reference_image or args.reference_video:
             print("--reference-image/--reference-video require --engine minimax-h3", file=sys.stderr)
@@ -2429,7 +2818,7 @@ def main() -> int:
 
     # Resolve resolution + aspect -> width x height
     preset_key = f"{args.resolution}-{args.aspect}"
-    presets = H3_VIDEO_PRESETS if is_h3 else VIDEO_PRESETS
+    presets = H3_VIDEO_PRESETS if is_h3 else LTX25_VIDEO_PRESETS if is_ltx25 else VIDEO_PRESETS
     if preset_key not in presets:
         print(f"Invalid preset combination: {preset_key}", file=sys.stderr)
         return 1
@@ -2438,6 +2827,8 @@ def main() -> int:
     # Default fps depends on the mode (ID-LoRA template runs at 25 fps).
     if is_h3:
         args.fps = 24
+    elif is_ltx25:
+        args.fps = LTX25_FPS
     elif args.fps is None:
         args.fps = IDLORA_DEFAULT_FPS if getattr(args, "id_lora", False) else DEFAULT_FPS
 
@@ -2675,14 +3066,22 @@ def main() -> int:
         else:
             mode = "MiniMax H3 text-to-video"
     else:
-        mode = "id-lora" if id_lora else ("lip-sync" if lipsync else ("image-to-video" if uploaded_image else "text-to-video"))
-        if not id_lora and not lipsync and uploaded_end_image:
-            mode += " (start+end)"
+        if is_ltx25:
+            mode = "LTX 2.5 " + ("first+last-to-video" if (uploaded_image and uploaded_end_image) else ("image-to-video" if uploaded_image else "text-to-video"))
+        else:
+            mode = "id-lora" if id_lora else ("lip-sync" if lipsync else ("image-to-video" if uploaded_image else "text-to-video"))
+            if not id_lora and not lipsync and uploaded_end_image:
+                mode += " (start+end)"
         if uploaded_audio:
             mode += " + audio"
     print(f"Mode: {mode} | {width}x{height} @ {args.fps}fps | {duration:.1f}s ({frames} frames)")
     # Resolve negative prompt (ID-LoRA template uses a different baseline).
-    base_negative = IDLORA_NEGATIVE_PROMPT if id_lora else NEGATIVE_PROMPT
+    if is_ltx25:
+        base_negative = LTX25_NEGATIVE_PROMPT
+    elif id_lora:
+        base_negative = IDLORA_NEGATIVE_PROMPT
+    else:
+        base_negative = NEGATIVE_PROMPT
     if args.negative_prompt and args.negative_prompt.startswith("!"):
         neg_prompt = args.negative_prompt[1:]  # full override
     elif args.negative_prompt:
@@ -2691,7 +3090,8 @@ def main() -> int:
         neg_prompt = base_negative
 
     attention_tag = f" | Attention: {'SageAttention' if args.sage_attention else 'PyTorch'}" if is_h3 else ""
-    print(f"Steps: {args.steps} | Seed: {seed}{attention_tag}" + (f" | Count: {count}" if count > 1 else ""))
+    steps_note = " (LTX 2.5 distilled uses fixed sigma schedules)" if is_ltx25 else ""
+    print(f"Steps: {args.steps}{steps_note} | Seed: {seed}{attention_tag}" + (f" | Count: {count}" if count > 1 else ""))
 
     replacement_audio_path = (
         reference_audio_metadata[0][0]
@@ -2732,6 +3132,7 @@ def main() -> int:
             h3_reference_audios=uploaded_h3_reference_audios,
             ref_image_size=args.ref_image_size,
             sage_attention=args.sage_attention,
+            pdd=args.pdd,
             preserve_reference_audio=args.preserve_reference_audio,
             identity_guidance_scale=args.identity_guidance_scale,
             original_audio_path=replacement_audio_path,

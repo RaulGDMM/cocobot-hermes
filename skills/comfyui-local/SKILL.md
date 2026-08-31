@@ -1,6 +1,6 @@
 ---
 name: comfyui-local
-description: Generate images and videos locally through the Windows ComfyUI broker using FLUX, LTX 2.3, and MiniMax H3.
+description: Generate images and videos locally through the Windows ComfyUI broker using FLUX, LTX 2.3, LTX 2.5, and MiniMax H3.
 metadata:
   {
     "openclaw":
@@ -34,8 +34,11 @@ Use `--model` to choose the image generation model. Default is `flux2-klein-9b`.
 |-------|------|---------|-------------------|------|------|----------|
 | FLUX.1 Dev | `--model flux1-dev` | High | ~8-12s | ~16GB | Good | Character consistency and detailed recurring subjects |
 | FLUX.2 Klein 9B | `--model flux2-klein-9b` | Higher | ~3-5s | ~12GB | Excellent | Speed, text rendering, landscapes and iteration |
+| Z-Image-Turbo | `--model z-image-turbo` | High | ~1-2s | ~10GB | Excellent, including Spanish | Ultra-fast generation, portraits, HDR-like lighting and text |
 
 FLUX.2 Klein 9B is a distillation of FLUX.2 Dev (32B) into a compact 9B model. It inherits FLUX.2's architecture: better prompt adherence, superior text rendering, improved anatomy, and higher native resolution (4MP vs 1MP). Despite being smaller than FLUX.1 Dev (12B), it outperforms it due to the FLUX.2 architecture.
+
+Z-Image-Turbo is Alibaba Tongyi Lab's distilled 6B S3-DiT model. It uses a Qwen3-4B text encoder, AuraFlow sampling, and 8-step generation. It is the fastest installed option and performed better than FLUX.2 Klein in our Spanish text-rendering comparison.
 
 For video series with recurring characters, prefer FLUX.1 Dev for character reference frames and FLUX.2 Klein for backgrounds, landscapes, text-heavy shots, and rapid iteration.
 
@@ -188,7 +191,7 @@ FLUX.2 Klein's i2i workflow uses **ReferenceLatent chaining** per the official C
 
 ---
 
-# ComfyUI Local — Video Generation (MiniMax H3 by default; LTX 2.3 optional)
+# ComfyUI Local — Video Generation (MiniMax H3 by default; LTX 2.5 and LTX 2.3 optional)
 
 Use the bundled script to generate videos locally through the broker on the Windows host.
 
@@ -196,7 +199,11 @@ Before calling the script, always send a short confirmation message to the user 
 
 ## MiniMax H3
 
-MiniMax H3 is the default engine because it provides substantially higher visual and audiovisual quality. `--engine minimax-h3` remains accepted when an explicit command is clearer. H3 generates native stereo audio jointly with the video and runs at a fixed 24 fps. Normal-quality generations should use the default 20 steps; lower step counts are only smoke tests.
+> **Detailed reference:** Before planning non-trivial H3 work—Ref2VA, continuation, editing, multiple references, dialogue, or performance tuning—read [`references/minimax-h3-guide.md`](references/minimax-h3-guide.md). It contains the official MiniMax/ComfyUI sources, mode-selection rules, prompt structures, continuation recipes, performance findings, and verification checklist.
+
+MiniMax H3 is the default engine because it provides substantially higher visual and audiovisual quality. `--engine minimax-h3` remains accepted when an explicit command is clearer. H3 generates native stereo audio jointly with the video and runs at a fixed 24 fps.
+
+**PDD 8-step is the default sampler (since 2026-08-31).** The script builds the workflow with the official Alibaba PAI PDD Acc LoRAs (`MiniMax-H3-{FL2VA,Ref2VA}-Acc-8Step.safetensors` in `models/pdd_acc/`, node pack `ComfyUI-MiniMax-H3-PDD-Acc`): `MiniMaxH3SigmaShift` (video 12 / audio 3) → `MiniMaxH3PDDAccApply` (nfe 8, lora 1.0, on_off_grid=error) → guider on the patched model, sampler `euler`, sigmas from the Apply node. A/B-validated on this machine: 5s FL2VA 480p 1.63×, 15s Ref2VA 1344×768 3 refs **2.23×** (914s → 410s), no visible degradation, dialogue present. **Only use the classic 20-step `res_multistep` mode when Raúl explicitly asks for it** (`--no-pdd`; keep `--steps 20`). The PDD recipe is fail-closed — the script rejects any `--steps` other than 4/6/8 while PDD is on.
 
 H3 uses the KJNodes `MiniMaxH3MemoryEfficientSageAttentionPatch` by default. This patches only MiniMax H3 transformer blocks; it does not enable SageAttention globally or change LTX workflows. Use `--no-sage-attention` only for troubleshooting or reproducible A/B comparisons against PyTorch attention.
 
@@ -248,12 +255,20 @@ uv run {baseDir}/scripts/generate_video.py --engine minimax-h3 \
 - Repeat `--reference-video` up to three times. Each clip must be 2–15 seconds at 23.976–60 fps, and their combined duration cannot exceed 15 seconds.
 - Reference videos are normalized locally to 24 fps H.264/AAC before upload so their timing matches H3's local Ref2VA node. Supported inputs: MP4, MOV, WebM, MKV, and AVI.
 
-### H3 reference audio modes
+### H3 Reference Audio & Dialogue
 
-H3 standalone audio references require at least one `--reference-image` or `--reference-video`. Repeat `--reference-audio` up to three times; each clip must be 2–15 seconds and their combined duration cannot exceed 15 seconds.
+H3 generates native stereo audio including dialogue, SFX, music, and ambience. **Spanish is fully supported** as one of 11 stable dialogue languages (Arabic, Chinese, English, French, German, Italian, Japanese, Korean, Portuguese, Russian, Spanish).
 
-Semantic mode is the default: H3 uses the audio for voice identity, words, cadence, timing, music, or sound design, then jointly generates a new AAC stereo soundtrack.
+**Dialogue in prompts:** Use speaker labels `(S1)`, `(S2)`, language tags, and `<d>` tags for exact text:
+```text
+The man (S1) looks at her and says, <d>[Spanish] ¿Estás bien?</d>
+She smiles and replies, <d>[Spanish] ¡Ahora sí!</d>
+```
+For simpler prompts, quotes work too: `speaking in Spanish, saying: "¿Estás bien?"`
 
+**Voice cloning with audio reference:** H3 accepts up to 3 standalone audio clips (2-15s each, 15s total combined) for voice identity transfer. The model clones the voice timbre and cadence from the reference and generates new speech with that voice.
+
+Semantic mode (default): H3 uses the audio for voice identity, words, cadence, timing, music, or sound design, then jointly generates a new AAC stereo soundtrack.
 ```bash
 uv run {baseDir}/scripts/generate_video.py \
   --reference-image portrait.png \
@@ -280,6 +295,48 @@ uv run {baseDir}/scripts/generate_video.py \
 - H3 presets are multiples of 32. Its `720p` preset maps to the native 1344×768 canvas.
 - Do not combine H3 with LTX-only flags such as `--audio`, `--lipsync`, or `--id-lora`.
 - The broker prepares prompts and uploads while Qwen is active, unloads llama.cpp for the GPU job, and restores the exact Qwen profile afterward.
+- **Pitfall — repo/venv drift breaks ComfyUI startup (seen 2026-08-21):** ComfyUI Desktop auto-updated the repo which now imports `ColorPrimaries`/`ColorTrc` from `av.video.reformatter` (needs PyAV ≥ 17, PR #2175) while `C:\ComfyUI\.venv` still had `av 16.1.0` → broker logs `RuntimeError: ComfyUI exited during startup` and every job fails with HTTP 500. **Diagnose via the last traceback in `E:\Workspace\Hermes\comfyui-process.log`.** RESOLVED 2026-08-21:
+  1. `uv pip install --python 'C:\ComfyUI\.venv\Scripts\python.exe' --upgrade 'av>=17'` → installed av 18.1.0. (cmd.exe mangles `"` quotes for uv — use PowerShell single-quotes, e.g. `powershell -NoProfile -Command "& uv pip install --python 'C:\ComfyUI\.venv\Scripts\python.exe' --upgrade 'av>=17'"`.)
+  2. Bump the repo pin `E:\Comfy-Desktop\ComfyUI-Installs\ComfyUI\ComfyUI\requirements.txt`: `av>=16.0.0` → `av>=17.0.0` (the old pin let the stale venv pass checks on future upgrades).
+  3. Verify: `C:\ComfyUI\.venv\Scripts\python.exe -c "from av.video.reformatter import ColorPrimaries, ColorRange, ColorTrc"` → IMPORT_OK.
+  Note: a 404 on broker `GET /v1/health` is NORMAL for this broker build — no health route; the broker is fine when the ComfyUI subprocess crashes.
+
+## LTX 2.5
+
+LTX 2.5 (Lightricks, 2026) is the newest LTX generation: a 22B distilled transformer that jointly generates **video + stereo audio** with fixed sigma schedules. It must be selected explicitly with `--engine ltx25`.
+
+Quality sits between H3 and LTX 2.3; it is faster than H3 and has better prompt adherence and audio than 2.3. Use it when you want native audio generation with LTX-style speed, or as an A/B alternative to H3.
+
+Text-to-video:
+
+```bash
+uv run {baseDir}/scripts/generate_video.py --engine ltx25 \
+  --prompt "A red fox leaping across a snowy forest at golden hour, cinematic" \
+  --filename output-t2v.mp4
+```
+
+Image-to-video (first frame):
+
+```bash
+uv run {baseDir}/scripts/generate_video.py --engine ltx25 \
+  --image first.png --prompt "The scene comes alive, camera slowly pushes in" \
+  --filename output-i2v.mp4
+```
+
+First+last-to-video (interpolate between two frames):
+
+```bash
+uv run {baseDir}/scripts/generate_video.py --engine ltx25 \
+  --image first.png --end-image last.png --prompt "A smooth transition between both frames" \
+  --filename output-flf.mp4
+```
+
+- Pipeline (mirrors the official Comfy-Org `video_ltx2_5_t2v/i2v/flf2v` templates): t2v/i2v run **two stages** — stage 1 at half resolution (8-sigma distilled schedule) → `LTXVLatentUpsampler` x2 → stage 2 refinement (4-sigma schedule). flf2v runs a **single full-resolution pass** (12-sigma schedule) with `LTXVAddGuide` on frame 0 and frame -1 (strength 0.7) plus `LTXVCropGuides`.
+- Sampling: `SamplerCustomAdvanced` + `euler_ancestral`, `LTXVDualCFGGuider` cfg 1/1, `ManualSigmas` — the distilled model ignores `--steps`; it prints 20 but the schedule is fixed. `--fps` is fixed at 24.
+- Audio is generated natively (no `--audio` conditioning in 2.5). Frame grid: 8k+1 (73 frames for 3s).
+- Models (in `F:\ComfyUIModels`): `diffusion_models/ltx-2.5-22b-distilled-int8-convrot.safetensors`, `clip/gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot.safetensors` (`CLIPLoader type="ltxv"`), `vae/ltx-2.5-vae.safetensors`, `vae/ltx-2.5-vae-encoder.safetensors`, `loras/ltx-2.5-32x-upscale.safetensors` (latent upscaler via `LatentUpscaleModelLoader`).
+- Not available in 2.5 (script rejects): `--audio`, `--lipsync`, `--id-lora`, `--reference-audio`, `--preserve-reference-audio`, `--reference-image/-video`.
+- 720p 3s measured on RTX 5090 (2026-08-27): t2v 45 s, i2v 44 s, flf2v 61 s. 1080p works but is ~2x slower; prefer 720p for iteration.
 
 ## LTX 2.3
 
