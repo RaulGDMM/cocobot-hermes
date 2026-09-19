@@ -28,13 +28,42 @@ Use the bundled script to generate images locally through the broker on the Wind
 
 ## Model Selection
 
-Use `--model` to choose the image generation model. Default is `flux2-klein-9b`.
+Use `--model` to choose the image generation model. **Default is `z-image-turbo`** (fast + good text). A/B-validated decision (2026-09-19, blind test, same prompt+seed):
+
+| Model | Flag | Role |
+|-------|------|------|
+| Z-Image-Turbo | `--model z-image-turbo` | **DEFAULT.** Fast + renders text well in most cases. |
+| Ideogram 4.0 | `--model ideogram4` | Use when **exact text matters** (posters, banners, infographics). 0 text errors in A/B; most reliable for Spanish text with accents. Slower (~4x) and heavier (~29GB). Auto-runs the magic prompt through the local LLM. |
+| FLUX.2 Klein 9B | `--model flux2-klein-9b` | **For image editing** (`--image`). Make exact-text work: in A/B it mangled "DEL"→"DE" and "ESPECIALIDAD"→"ESPECIALDAD". |
+| FLUX.1 Dev | `--model flux1-dev` | Character consistency / i2i via Kontext. |
 
 | Model | Flag | Quality | Speed (RTX 5090) | VRAM | Text | Best for |
 |-------|------|---------|-------------------|------|------|----------|
 | FLUX.1 Dev | `--model flux1-dev` | High | ~8-12s | ~16GB | Good | Character consistency and detailed recurring subjects |
 | FLUX.2 Klein 9B | `--model flux2-klein-9b` | Higher | ~3-5s | ~12GB | Excellent | Speed, text rendering, landscapes and iteration |
 | Z-Image-Turbo | `--model z-image-turbo` | High | ~1-2s | ~10GB | Excellent, including Spanish | Ultra-fast generation, portraits, HDR-like lighting and text |
+| Ideogram 4.0 | `--model ideogram4` | State-of-the-art (AA #1 open-weights) | ~70s end-to-end (incl. model load) | ~29GB (dual DiT fp8 + Qwen3-VL-8B encoder) | **Best-in-class**, incl. Spanish, with exact layout control | Posters, banners, covers, infographics, any image with in-frame text; 2K native; hex color palettes |
+
+### Ideogram 4.0
+
+Ideogram 4 (9.3B single-stream DiT, trained from scratch, June 2026) is the #1 open-weights model on the Artificial Analysis image leaderboard (Elo ~1012). It uses a Qwen3-VL-8B vision-language model as text encoder and **dual-branch CFG**: a conditional and an unconditional DiT (both fp8, `ideogram4_fp8_scaled.safetensors` + `ideogram4_unconditional_fp8_scaled.safetensors`), asymmetric `DualModelGuider` cfg=7, `CFGOverride` cfg=3 from 70% of the schedule, and an `Ideogram4Scheduler` (flow matching, mu/std per preset).
+
+**⚠️ SAFETY FILTER — THE CRITICAL PITFALL.** Ideogram 4 has a built-in safety filter trained into the weights. Plain-text (natural-language) prompts trigger it at a HIGH false-positive rate: instead of an image you get a gray placeholder saying `Image blocked by safety filter`. This is NOT the broker, NOT ComfyUI, and NOT a content-moderation service — it is inside the model, and there is no flag to disable it. The fix is the model's own training format: **structured JSON captions**. The script handles this automatically: for `--model ideogram4` with a natural-language prompt, it calls the local LLM (`magic_prompt_expansion()`, official open-source system prompt `ideogram4_magic_prompt_v1.txt` next to the script, via llama-server at `http://172.23.176.1:30000`, override with `--llama-url` or `OPENCLAW_LLAMA_URL`) to expand the prompt into the JSON caption schema, then sends that to ComfyUI. If the LLM is down it falls back to the raw prompt — expect blocks in that case. If the user's prompt is already a structured JSON object (contains `compositional_deconstruction`), it is passed through untouched.
+
+**JSON caption schema** (what the magic prompt emits; also accepted directly in `--prompt`): `{high_level_description, style_description{aesthetics,lighting,photo|art_style,medium,color_palette[#RRGGBB upper]}, compositional_deconstruction{background, elements[{type:"obj"|"text", bbox:[y1,x1,y2,x2] 0-1000, desc|text}]}}` — key order matters (the model was trained on a consistent order). In-image text goes in `text` elements with verbatim characters; bbox gives explicit placement; `color_palette` hexes steer the palette. Full guide: https://github.com/ideogram-oss/ideogram4/blob/main/docs/prompting.md
+
+**Presets** (`--preset`): `quality` (48 steps, mu 0.0, std 1.5 — best for final posters), `default` (20 steps), `turbo` (12 steps, mu 0.5). `--steps` overrides the preset's step count. Resolutions: any multiple of 16 from 256 to 2048, aspect up to 6:1. 1280x720 default preset measured ~70s end-to-end on the broker (including ~29GB model load — the broker swaps the LLM out first, per the standing GPU rule).
+
+**Limitations:** text-to-image only (no `--image` editing — the script rejects it; mask inpainting exists via community LoRA but is not wired in). Non-commercial license (Ideogram 4 Non-Commercial Model Agreement, accepted 2026-09-19): fine for personal use, not for commercial deliverables. For i2i keep using FLUX.1 Dev / FLUX.2 Klein.
+
+**Required model files** (in `F:\ComfyUIModels`, downloaded from the public `Comfy-Org/Ideogram-4` repo — do NOT use the gated `ideogram-ai/ideogram-4-fp8` diffusers repo, its key prefixes are incompatible with the ComfyUI loaders):
+
+| File | Folder | Size |
+|------|--------|------|
+| `ideogram4_fp8_scaled.safetensors` | `diffusion_models/` | 9.3 GB |
+| `ideogram4_unconditional_fp8_scaled.safetensors` | `diffusion_models/` | 9.3 GB |
+| `qwen3vl_8b_fp8_scaled.safetensors` | `text_encoders/` | 10.6 GB |
+| `flux2-vae.safetensors` | `vae/` (shared with FLUX.2) | 321 MB |
 
 FLUX.2 Klein 9B is a distillation of FLUX.2 Dev (32B) into a compact 9B model. It inherits FLUX.2's architecture: better prompt adherence, superior text rendering, improved anatomy, and higher native resolution (4MP vs 1MP). Despite being smaller than FLUX.1 Dev (12B), it outperforms it due to the FLUX.2 architecture.
 
@@ -142,7 +171,7 @@ Prompt tips for editing:
 Notes (images)
 
 - This skill is local-only and uses the Windows broker plus ComfyUI.
-- **Model selection**: `--model flux1-dev` (default) or `--model flux2-klein-9b`. FLUX.2 Klein 9B is faster (~3-5s vs ~8-12s on RTX 5090) and produces higher quality with better text rendering.
+- **Model selection**: default is `--model z-image-turbo` (fast + good text). Use `--model ideogram4` when exact in-frame text matters (posters/banners); use `--model flux2-klein-9b` for image editing. See the "Model Selection" table above for the A/B-validated reasoning.
 - **Image editing**: Both models support image editing via `--image`. FLUX.1 uses Kontext architecture, FLUX.2 Klein uses a completely different native i2i workflow. Edit with FLUX.2 Klein: `--image "input.png" --model flux2-klein-9b --prompt "your edit"`.
 
 ### FLUX.2 Klein i2i — CRITICAL SETTINGS
