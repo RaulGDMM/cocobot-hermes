@@ -2,7 +2,8 @@
 # Uso:
 #   .\start-hermes.ps1            -> arranca todo (llama-server + gateway + broker + ...)
 #   .\start-hermes.ps1 -LlamaOnly -> SOLO llama-server con el perfil seleccionado
-param([switch]$LlamaOnly)
+#   .\start-hermes.ps1 -Model qwen38_27b_unsloth_q6k_mtp -> usa ese modelo en este arranque (no modifica el default)
+param([switch]$LlamaOnly, [string]$Model)
 
 # ---- CONFIGURACION ----
 # Instalacion de llama.cpp: "stable" (mainline), "latest" (pruebas), "ik_llama" (fork con KV Q6_0 y MTP), "beellama" (DFlash + TurboQuant)
@@ -11,8 +12,13 @@ param([switch]$LlamaOnly)
 # MTP tampoco funciona con multimodal. Volver a ik_llama cuando ambos problemas esten resueltos.
 $useLlamaInstall = "stable"
 
-# Modelo LLM: "qwen38_27b_unsloth_q6k_mtp", "qwen38_27b_nvfp4_q8attn_mtp", "qwen36_27b_bee_q5", "qwen36_27b_bee_q6", "qwen36_27b", "qwen36_27b_q6", "qwen36_27b_q4_mtp", "qwen36_27b_q5_mtp", "qwen36_27b_q6_mtp", "qwen36_27b_autoround_q6_mtp", "qwen36_27b_bartowski_q6kl_mtp", "qwen36", "qwen36q4", "qwen35", "gemma4"
-$useModel = "qwen38_27b_nvfp4_q8attn_mtp"
+# Modelo LLM: "qwen38_27b_unsloth_q6k_mtp", "qwen38_27b_unsloth_q6k_dflash2", "qwen38_27b_nvfp4_q8attn_mtp", "gemma4"
+# 2026-08-31: DFlash2 queda como perfil experimental tras el A/B; no usar como
+# default hasta que llama.cpp resuelva la corrupción del draft KV con mtmd (#27408).
+# Baseline MTP b10719:
+# ~/.hermes/benchmarks/llama-benchy/baseline-qwen38-mtp-b10719-20260831-145341.json
+$useModel = "qwen38_27b_unsloth_q6k_mtp"
+if ($Model) { $useModel = $Model }
 
 # Herramienta browser: $true para activarla, $false para desactivarla
 $useBrowserTool = $true
@@ -94,7 +100,7 @@ function Invoke-LlamaWarmup {
         if (-not $modelId) { $modelId = ($models.data | Where-Object { $_.id -ne "default" } | Select-Object -First 1).id }
         if (-not $modelId) { $modelId = $models.data[0].id }
     } catch {
-        $modelId = if ($useModel -in @("qwen38_27b_unsloth_q6k_mtp","qwen38_27b_nvfp4_q8attn_mtp")) { "qwen3.8-27b" } else { "qwen3.6-27b" }
+        $modelId = if ($useModel -eq "gemma4") { "gemma4-31b" } else { "qwen3.8-27b" }
     }
     Write-Host "  Modelo: $modelId" -ForegroundColor Gray
     $warmupBody = @{
@@ -127,100 +133,57 @@ function Get-LlamaInstallInfo {
 }
 
 $llamaInstall = Get-LlamaInstallInfo -InstallName $useLlamaInstall
-if ($useModel -in @("qwen36_27b_bee_q5","qwen36_27b_bee_q6") -and $useLlamaInstall -ne "beellama") {
-    throw "Los modelos BeeLlama Qwen3.6-27B requieren `$useLlamaInstall = 'beellama'."
-}
 
 Write-Host "[0] Tailscale: se arrancara en la pestana WSL del gateway" -ForegroundColor DarkCyan
 Write-Host ""
 
 # 1. Comprobar y arrancar llama-server
-if ($useModel -eq "qwen36") {
-    $modelLabel    = "Qwen3.6-35B-A3B-Q5_K_M"
-    $modelSize     = "25 GB, vision+thinking, MoE 3B active"
-    $ctxSize       = "100000"
-} elseif ($useModel -eq "qwen36q4") {
-    $modelLabel    = "Qwen3.6-35B-A3B-Q4_K_L"
-    $modelSize     = "22 GB, vision+thinking, MoE 3B active"
-    $ctxSize       = "200000"
-} elseif ($useModel -eq "qwen36_27b_bee_q5") {
-    $modelLabel    = "Qwen3.6-27B-Q5_K_S + DFlash Q4_K_M"
-    $modelSize     = "17.6 GB target + DFlash draft, vision+thinking, dense 27B, TurboQuant KV, ctx max"
-    $ctxSize       = "262144"
-} elseif ($useModel -eq "qwen36_27b_bee_q6") {
-    $modelLabel    = "Qwen3.6-27B-Q6_K + DFlash Q4_K_M"
-    $modelSize     = "21.0 GB target + DFlash draft, vision+thinking, dense 27B, TurboQuant KV, ctx 191k"
-    $ctxSize       = "191608"
-} elseif ($useModel -eq "qwen36_27b") {
-    $modelLabel    = "Qwen3.6-27B-UD-Q4_K_XL"
-    $modelSize     = "17.6 GB, vision+thinking, dense 27B, Unsloth Dynamic 2.0, KV Q8_0+rot"
-    $ctxSize       = "200000"
-} elseif ($useModel -eq "qwen36_27b_q6") {
-    if ($useLlamaInstall -eq "ik_llama") {
-        $modelLabel    = "Qwen3.6-27B-Q6_K"
-        $modelSize     = "22.5 GB, vision+thinking, dense 27B, Q6_K, KV Q6_0+Hadamard (ik_llama unifies KV across 4 slots)"
-        $ctxSize       = "196608"
-    } else {
-        $modelLabel    = "Qwen3.6-27B-Q6_K"
-        $modelSize     = "22.5 GB, vision+thinking, dense 27B, Q6_K, KV Q8_0+rot"
-        $ctxSize       = "131072"
-    }
-} elseif ($useModel -eq "qwen36_27b_q4_mtp") {
-    $modelLabel    = "Qwen3.6-27B-UD-Q4_K_XL MTP"
-    $modelSize     = "17.9 GB + MTP/NextN heads, vision+thinking, dense 27B, Unsloth Dynamic 2.0, mainline llama.cpp MTP, KV Q8_0, ctx 150k"
-    $ctxSize       = "150000"
-} elseif ($useModel -eq "qwen36_27b_q5_mtp") {
-    $modelLabel    = "Qwen3.6-27B-UD-Q5_K_XL MTP"
-    $modelSize     = "20.4 GB + MTP/NextN heads, vision+thinking, dense 27B, mainline llama.cpp MTP, KV Q8_0, ctx 130k"
-    $ctxSize       = "130000"
-} elseif ($useModel -eq "qwen36_27b_q6_mtp") {
-    $modelLabel    = "Qwen3.6-27B-Q6_K MTP"
-    $modelSize     = "22.9 GB + MTP/NextN heads, vision+thinking, dense 27B, mainline llama.cpp MTP, KV K Q5_1 / V Q4_0 + draft KV F16, ctx 170k, encoder en GPU"
-    $ctxSize       = "170000"
-} elseif ($useModel -eq "qwen36_27b_autoround_q6_mtp") {
-    $modelLabel    = "Qwen3.6-27B-AutoRound-Q6_K MTP"
-    $modelSize     = "21 GB + MTP/NextN heads, vision+thinking, dense 27B, Intel AutoRound Q6_K (sphaela, virtually indistinguishable from F16), KV K Q8_0 / V Q5_1 + draft KV F16, ctx 150k, encoder en GPU"
-    $ctxSize       = "150000"
-} elseif ($useModel -eq "qwen36_27b_bartowski_q6kl_mtp") {
-    $modelLabel    = "Qwen3.6-27B Bartowski Q6_K_L MTP"
-    $modelSize     = "22.6 GiB, MTP/NextN integrado Q8_0, vision+thinking, KV K Q8_0 / V Q5_1 + draft KV F16, ctx 115k"
-    $ctxSize       = "115000"
-} elseif ($useModel -eq "qwen38_27b_unsloth_q6k_mtp") {
+if ($useModel -eq "qwen38_27b_unsloth_q6k_mtp") {
+
     $modelLabel    = "Qwen3.8-27B Unsloth Q6_K MTP"
-    $modelSize     = "21.3 GiB, MTP integrado, vision+thinking xhigh, KV K Q8_0 / V Q5_1 + draft KV F16, ctx 140k"
+    $modelSize     = "20.4 GiB (UD-Q6_K, Dynamic 3.0), MTP integrado, vision+thinking medium, KV K Q8_0 / V Q5_1 + draft KV F16, ctx 140k"
     $ctxSize       = "140000"
+} elseif ($useModel -eq "qwen38_27b_unsloth_q6k_dflash2") {
+    # A/B vs MTP: mismo target, drafter DFlash2 externo (incoai Q4_K_M).
+    # load_mtp=false (no hay draft-mtp en spec-type) -> la capa MTP blk.64 entera
+    # se marca TENSOR_SKIP y NO se asigna memoria: ~400 MiB liberados vs MTP.
+    # La primera carga a 140k revelo dos cosas: faltaba aplicar q8_0/q5_1 en la
+    # rama DFlash2 y WDDM llego a usar 4.1 GiB de RAM compartida. Con el KV ya
+    # cuantizado, 140k quedo justo (31.3/32.6 GiB tras uso real) -> 130k para
+    # dejar ~1.5 GiB de margen para buffers transitorios y cuadros CUDA.
+    # Draft KV DFlash2 = ventana fija 2048 (~200 MiB), no escala con ctx.
+    $modelLabel    = "Qwen3.8-27B Unsloth Q6_K + DFlash2 Q4_K_M"
+    $modelSize     = "20.4 GiB target + 1.1 GiB drafter, vision+thinking medium, KV K Q8_0 / V Q5_1, ctx 130k"
+    $ctxSize       = "130000"
 } elseif ($useModel -eq "qwen38_27b_nvfp4_q8attn_mtp") {
     $modelLabel    = "Qwen3.8-27B NVFP4-MTP-Q8attn (utautako)"
-    $modelSize     = "17.8 GiB, MTP integrado, FFN NVFP4 + atencion/DeltaNet Q8_0, vision+thinking xhigh, KV K Q8_0 / V Q5_1 + draft KV F16, ctx 230k (margen VRAM)"
+    $modelSize     = "17.8 GiB, MTP integrado, FFN NVFP4 + atencion/DeltaNet Q8_0, vision+thinking medium, KV K Q8_0 / V Q5_1 + draft KV F16, ctx 230k (margen VRAM)"
     $ctxSize       = "230000"
 } elseif ($useModel -eq "gemma4") {
     $modelLabel    = "Gemma 4 31B-it UD-Q4_K_XL"
     $modelSize     = "17.5 GB, vision+thinking"
     $ctxSize       = "100000"
 } else {
-    $modelLabel    = "Qwen3.5-27B-UD-Q4_K_XL"
-    $modelSize     = "17.6 GB, vision"
-    $ctxSize       = "131072"
+    throw "Perfil de modelo desconocido: '$useModel'. Perfiles validos: qwen38_27b_unsloth_q6k_mtp, qwen38_27b_unsloth_q6k_dflash2, qwen38_27b_nvfp4_q8attn_mtp, gemma4."
 }
 
 # Sampling params — single source of truth for both llama-server and broker restarts
 # 2026-08-15: qwen38 = 1.0 (recomendación oficial Unsloth para 3.8 thinking-only;
 # se probó 0.8 y se volvió al punto sintonizado oficial). Resto de perfiles: 0.6.
-$env:OPENCLAW_LLAMA_TEMP = if ($useModel -in @("qwen38_27b_unsloth_q6k_mtp","qwen38_27b_nvfp4_q8attn_mtp")) { "1.0" } else { "0.6" }
+$env:OPENCLAW_LLAMA_TEMP = if ($useModel -in @("qwen38_27b_unsloth_q6k_mtp","qwen38_27b_unsloth_q6k_dflash2","qwen38_27b_nvfp4_q8attn_mtp")) { "1.0" } else { "0.6" }
 $env:OPENCLAW_LLAMA_TOP_P = "0.95"
 $env:OPENCLAW_LLAMA_TOP_K = "20"
 $env:OPENCLAW_LLAMA_MIN_P = "0"
 $env:OPENCLAW_LLAMA_PREDICT = "81920"
-if ($useModel -in @("qwen38_27b_unsloth_q6k_mtp","qwen38_27b_nvfp4_q8attn_mtp","qwen36_27b_bee_q5","qwen36_27b_bee_q6","qwen36_27b","qwen36_27b_q6","qwen36_27b_q4_mtp","qwen36_27b_q5_mtp","qwen36_27b_q6_mtp","qwen36_27b_autoround_q6_mtp","qwen36_27b_bartowski_q6kl_mtp")) {
+if ($useModel -in @("qwen38_27b_unsloth_q6k_mtp","qwen38_27b_unsloth_q6k_dflash2","qwen38_27b_nvfp4_q8attn_mtp")) {
     $env:OPENCLAW_LLAMA_PRESENCE_PENALTY = "0"
 } else {
     $env:OPENCLAW_LLAMA_PRESENCE_PENALTY = "1.5"
 }
 
 # MTP (Multi-Token Prediction) — upstream llama.cpp mainline uses --spec-type draft-mtp.
-# Requires a GGUF that includes MTP/NextN heads. Keep this isolated in qwen36_27b_*_mtp
-# so BeeLlama/DFlash remains one edit away if MTP is not stable enough for Hermes.
-$env:OPENCLAW_LLAMA_MTP_ENABLED = if ($useModel -in @("qwen38_27b_unsloth_q6k_mtp","qwen38_27b_nvfp4_q8attn_mtp","qwen36_27b_q4_mtp","qwen36_27b_q5_mtp","qwen36_27b_q6_mtp","qwen36_27b_autoround_q6_mtp","qwen36_27b_bartowski_q6kl_mtp")) { "1" } else { "0" }
+# Requires a GGUF that includes MTP/NextN heads (integrados en el gguf de Qwen3.8).
+$env:OPENCLAW_LLAMA_MTP_ENABLED = if ($useModel -in @("qwen38_27b_unsloth_q6k_mtp","qwen38_27b_nvfp4_q8attn_mtp")) { "1" } else { "0" }
 # 2026-08-15: 3 (default llama.cpp) para qwen38 — con 65% acceptance y meanlen 2.5
 # el 3er token draftado casi siempre se acepta (+5-12% TG). Resto de perfiles: 2.
 $env:OPENCLAW_LLAMA_MTP_DRAFT_N_MAX = if ($useModel -in @("qwen38_27b_unsloth_q6k_mtp","qwen38_27b_nvfp4_q8attn_mtp")) { "3" } else { "2" }
@@ -230,50 +193,14 @@ Write-Host "[1/6] Comprobando llama-server ($modelLabel)..." -ForegroundColor Ye
 
 $llamaRoot       = Join-Path $openclawRoot $llamaInstall.DirName
 $llamaServerExe  = Join-Path $llamaRoot "llama-server.exe"
-if ($useModel -eq "qwen36") {
-    $modelFile    = Join-Path $openclawRoot "models\qwen36-35b\Qwen3.6-35B-A3B-Q5_K_M.gguf"
-    $mmProjFile   = Join-Path $openclawRoot "models\qwen36-35b\mmproj-BF16.gguf"
-} elseif ($useModel -eq "qwen36q4") {
-    $modelFile    = Join-Path $openclawRoot "models\qwen36-35b\Qwen3.6-35B-A3B-Q4_K_L.gguf"
-    $mmProjFile   = Join-Path $openclawRoot "models\qwen36-35b\mmproj-BF16.gguf"
-} elseif ($useModel -eq "qwen36_27b_bee_q5") {
-    $modelFile    = Join-Path $openclawRoot "beellama\models\Qwen3.6-27B-Q5_K_S.gguf"
-    $mmProjFile   = Join-Path $openclawRoot "beellama\models\mmproj-BF16.gguf"
-    $draftModelFile = Join-Path $openclawRoot "beellama\models\dflash-draft-3.6-q4_k_m.gguf"
-} elseif ($useModel -eq "qwen36_27b_bee_q6") {
-    $modelFile    = Join-Path $openclawRoot "models\qwen36-27b\Qwen3.6-27B-Q6_K.gguf"
-    $mmProjFile   = Join-Path $openclawRoot "models\qwen36-27b\mmproj-BF16.gguf"
-    $draftModelFile = Join-Path $openclawRoot "beellama\models\dflash-draft-3.6-q4_k_m.gguf"
-} elseif ($useModel -eq "qwen36_27b") {
-    $modelFile    = Join-Path $openclawRoot "models\qwen36-27b\Qwen3.6-27B-UD-Q4_K_XL.gguf"
-    $mmProjFile   = Join-Path $openclawRoot "models\qwen36-27b\mmproj-BF16.gguf"
-} elseif ($useModel -eq "qwen36_27b_q6") {
-    # Use MTP gguf only when MTP esta activado; con MTP off el gguf MTP carga ~400 MiB extra inutiles.
-    if ($useLlamaInstall -eq "ik_llama" -and $env:OPENCLAW_LLAMA_MTP_ENABLED -eq "1") {
-        $modelFile = Join-Path $openclawRoot "models\qwen36-27b\Qwen3.6-27B-Q6_K-mtp.gguf"
-    } else {
-        $modelFile = Join-Path $openclawRoot "models\qwen36-27b\Qwen3.6-27B-Q6_K.gguf"
-    }
-    $mmProjFile   = Join-Path $openclawRoot "models\qwen36-27b\mmproj-BF16.gguf"
-} elseif ($useModel -eq "qwen36_27b_q4_mtp") {
-    # Same file as qwen36_27b profile: Unsloth's UD-Q4_K_XL gguf already includes MTP heads
-    $modelFile    = Join-Path $openclawRoot "models\qwen36-27b\Qwen3.6-27B-UD-Q4_K_XL.gguf"
-    $mmProjFile   = Join-Path $openclawRoot "models\qwen36-27b\mmproj-F16.gguf"
-} elseif ($useModel -eq "qwen36_27b_q5_mtp") {
-    $modelFile    = Join-Path $openclawRoot "models\qwen36-27b\Qwen3.6-27B-UD-Q5_K_XL.gguf"
-    $mmProjFile   = Join-Path $openclawRoot "models\qwen36-27b\mmproj-F16.gguf"
-} elseif ($useModel -eq "qwen36_27b_q6_mtp") {
-    $modelFile    = Join-Path $openclawRoot "models\qwen36-27b\Qwen3.6-27B-Q6_K-mtp.gguf"
-    $mmProjFile   = Join-Path $openclawRoot "models\qwen36-27b\mmproj-BF16.gguf"
-} elseif ($useModel -eq "qwen36_27b_autoround_q6_mtp") {
-    $modelFile    = Join-Path $openclawRoot "models\qwen36-27b\Qwen3.6-27B-AutoRound-Q6_K.gguf"
-    $mmProjFile   = Join-Path $openclawRoot "models\qwen36-27b\mmproj-BF16.gguf"
-} elseif ($useModel -eq "qwen36_27b_bartowski_q6kl_mtp") {
-    $modelFile    = Join-Path $openclawRoot "models\qwen36-27b\Qwen_Qwen3.6-27B-Q6_K_L.gguf"
-    $mmProjFile   = Join-Path $openclawRoot "models\qwen36-27b\mmproj-BF16.gguf"
-} elseif ($useModel -eq "qwen38_27b_unsloth_q6k_mtp") {
-    $modelFile    = Join-Path $openclawRoot "models\qwen38-27b\Qwen3.8-27B-Q6_K.gguf"
+if ($useModel -eq "qwen38_27b_unsloth_q6k_mtp") {
+
+    $modelFile    = Join-Path $openclawRoot "models\qwen38-27b\Qwen3.8-27B-UD-Q6_K.gguf"
     $mmProjFile   = Join-Path $openclawRoot "models\qwen38-27b\mmproj-BF16.gguf"
+} elseif ($useModel -eq "qwen38_27b_unsloth_q6k_dflash2") {
+    $modelFile    = Join-Path $openclawRoot "models\qwen38-27b\Qwen3.8-27B-UD-Q6_K.gguf"
+    $mmProjFile   = Join-Path $openclawRoot "models\qwen38-27b\mmproj-BF16.gguf"
+    $draftModelFile = Join-Path $openclawRoot "models\qwen38-27b\Qwen3.8-27B-DFlash2-Q4_K_M.gguf"
 } elseif ($useModel -eq "qwen38_27b_nvfp4_q8attn_mtp") {
     $modelFile    = Join-Path $openclawRoot "models\qwen38-27b\Qwen3.8-27B-NVFP4-MTP-Q8attn.gguf"
     $mmProjFile   = Join-Path $openclawRoot "models\qwen38-27b\mmproj-BF16.gguf"
@@ -281,8 +208,7 @@ if ($useModel -eq "qwen36") {
     $modelFile    = Join-Path $openclawRoot "models\gemma4-31b\gemma-4-31B-it-UD-Q4_K_XL.gguf"
     $mmProjFile   = Join-Path $openclawRoot "models\gemma4-31b\mmproj-BF16.gguf"
 } else {
-    $modelFile    = Join-Path $openclawRoot "models\qwen35-27b\Qwen3.5-27B-UD-Q4_K_XL.gguf"
-    $mmProjFile   = Join-Path $openclawRoot "models\qwen35-27b\mmproj-BF16.gguf"
+    throw "Perfil de modelo desconocido: '$useModel'."
 }
 $llamaPort = 30000
 
@@ -291,8 +217,7 @@ if (-not (Test-Path $llamaServerExe)) {
 }
 elseif (-not (Test-Path $modelFile)) {
     Write-Host "[!] No se encuentra el modelo GGUF en $modelFile" -ForegroundColor Red
-}
-elseif ($useModel -in @("qwen36_27b_bee_q5","qwen36_27b_bee_q6") -and -not (Test-Path $draftModelFile)) {
+} elseif ($useModel -eq "qwen38_27b_unsloth_q6k_dflash2" -and -not (Test-Path $draftModelFile)) {
     Write-Host "[!] No se encuentra el draft DFlash GGUF en $draftModelFile" -ForegroundColor Red
 }
 else {
@@ -313,7 +238,7 @@ else {
         $llamaLaunchEnv = @{}
         $llamaArgs = @(
             "--model",               $modelFile,
-            "--alias",               $(if ($useModel -in @("qwen38_27b_unsloth_q6k_mtp","qwen38_27b_nvfp4_q8attn_mtp")) { "qwen3.8-27b,$useModel" } else { "qwen3.6-27b,$useModel" }),
+            "--alias",               $(if ($useModel -in @("qwen38_27b_unsloth_q6k_mtp","qwen38_27b_unsloth_q6k_dflash2","qwen38_27b_nvfp4_q8attn_mtp")) { "qwen3.8-27b,$useModel" } else { "gemma4-31b,$useModel" }),
             "--mmproj",              $mmProjFile,
             "--ctx-size",            $ctxSize,
             "--slot-save-path",      $slotCachePath,
@@ -326,36 +251,30 @@ else {
             "--log-file",            $llamaLogFile
         )
         # Model-specific flags
-        if ($useModel -in @("qwen38_27b_unsloth_q6k_mtp","qwen38_27b_nvfp4_q8attn_mtp","qwen36","qwen36q4","qwen36_27b_bee_q5","qwen36_27b_bee_q6","qwen36_27b","qwen36_27b_q6","qwen36_27b_q4_mtp","qwen36_27b_q5_mtp","qwen36_27b_q6_mtp","qwen36_27b_autoround_q6_mtp","qwen36_27b_bartowski_q6kl_mtp")) {
-            $chatTemplateFile = if ($useModel -in @("qwen38_27b_unsloth_q6k_mtp","qwen38_27b_nvfp4_q8attn_mtp")) { $null } else { Join-Path $openclawRoot "models\qwen36-27b\qwen3.6-enhanced.jinja" }
-            $ubatchSize = if ($useModel -in @("qwen38_27b_unsloth_q6k_mtp","qwen38_27b_nvfp4_q8attn_mtp","qwen36_27b_q6_mtp","qwen36_27b_autoround_q6_mtp","qwen36_27b_bartowski_q6kl_mtp")) { "1024" } else { "2048" }
+        if ($useModel -in @("qwen38_27b_unsloth_q6k_mtp","qwen38_27b_unsloth_q6k_dflash2","qwen38_27b_nvfp4_q8attn_mtp")) {
+            $ubatchSize = "1024"
             $llamaArgs += @("--ubatch-size", $ubatchSize)
             $llamaArgs += @("--jinja")
-            if ($chatTemplateFile) { $llamaArgs += @("--chat-template-file", $chatTemplateFile) }
             $llamaArgs += @("--reasoning", "on")
-            if ($useModel -in @("qwen38_27b_unsloth_q6k_mtp","qwen38_27b_nvfp4_q8attn_mtp")) { $llamaArgs += @("--reasoning-preserve") }
+            if ($useModel -in @("qwen38_27b_unsloth_q6k_mtp","qwen38_27b_unsloth_q6k_dflash2","qwen38_27b_nvfp4_q8attn_mtp")) { $llamaArgs += @("--reasoning-preserve") }
             $llamaArgs += @("--image-min-tokens", "1024")
             $llamaArgs += @("--image-max-tokens", "1024")
             $llamaArgs += @("--presence-penalty", $env:OPENCLAW_LLAMA_PRESENCE_PENALTY)
             $llamaArgs += @("--min-p", $env:OPENCLAW_LLAMA_MIN_P)
             $llamaArgs += @("--predict", $env:OPENCLAW_LLAMA_PREDICT)
             $llamaArgs += @("--temp", $env:OPENCLAW_LLAMA_TEMP, "--top-p", $env:OPENCLAW_LLAMA_TOP_P, "--top-k", $env:OPENCLAW_LLAMA_TOP_K)
-            # 2026-08-19: llama.cpp solo respeta la env LLAMA_ARG_CHAT_TEMPLATE_KWARGS
-            # (la variable vieja LLAMA_CHAT_TEMPLATE_KWARGS sin _ARG era ignorada y el
-            # server quedaba en el default de la plantilla, xhigh). El flag CLI
-            # --chat-template-kwargs va en la linea de comandos (cubre ambos modos
-            # de arranque: tab de wt y Start-Process). Default qwen38: medium.
-            $chatTemplateKwargs = if ($useModel -in @("qwen38_27b_unsloth_q6k_mtp","qwen38_27b_nvfp4_q8attn_mtp")) { '{"enable_thinking":true,"preserve_thinking":true,"reasoning_effort":"medium"}' } else { '{"preserve_thinking":true,"tool_call_format":"xml"}' }
+            # llama.cpp usa LLAMA_ARG_CHAT_TEMPLATE_KWARGS. No se pasa el JSON como
+            # argumento CLI porque cmd.exe consume sus comillas al lanzar la pestana.
+            # Default qwen38: xhigh (calidad prioritaria; debe coincidir con el broker).
+            $chatTemplateKwargs = '{"enable_thinking":true,"preserve_thinking":true,"reasoning_effort":"xhigh"}'
             $env:LLAMA_ARG_CHAT_TEMPLATE_KWARGS = $chatTemplateKwargs
             $llamaLaunchEnv["LLAMA_ARG_CHAT_TEMPLATE_KWARGS"] = $chatTemplateKwargs
-            $llamaArgs += @("--chat-template-kwargs", $chatTemplateKwargs)
             $llamaArgs += @("--no-prefill-assistant")
             # MTP keeps draft state per slot, breaking ik_llama's KV unification.
             # Force parallel=1 when MTP active on ik_llama to avoid KV exhaustion.
             $useMtp = ($env:OPENCLAW_LLAMA_MTP_ENABLED -eq "1")
-            if ($useModel -in @("qwen36_27b_bee_q5","qwen36_27b_bee_q6")) {
-                $llamaArgs += @("--parallel", "1")
-            } elseif ($useMtp) {
+            if ($useModel -eq "qwen38_27b_unsloth_q6k_dflash2" -or $useMtp) {
+                # DFlash2/MTP mantienen estado draft por slot -> 1 slot.
                 $llamaArgs += @("--parallel", "1")
             } else {
                 $llamaArgs += @("--parallel", "2")
@@ -364,56 +283,33 @@ else {
                 # ik_llama unifies KV across slots by default (n_ctx is total, not per-slot).
                 # Lacks --kv-unified / --no-cache-idle-slots; checkpoint flag is renamed.
                 $llamaArgs += @("--ctx-checkpoints", "32", "--ctx-checkpoints-interval", "1024", "--cache-ram", "16384", "--no-context-shift")
-            } elseif ($useModel -in @("qwen36_27b_bee_q5","qwen36_27b_bee_q6")) {
-                $llamaArgs += @("--kv-unified", "--ctx-checkpoints", "32", "--checkpoint-min-step", "8192", "--cache-ram", "32768", "--no-context-shift", "--no-cache-idle-slots")
-            } elseif ($useMtp) {
-                # Mainline MTP: keep checkpoints dense enough for rollback while retaining
-                # a broader span of long agentic histories within the 32-checkpoint limit.
+            } elseif ($useMtp -or $useModel -eq "qwen38_27b_unsloth_q6k_dflash2") {
+                # Mainline MTP/DFlash2: keep checkpoints dense enough for rollback while
+                # retaining a broader span of long agentic histories within the 32-checkpoint limit.
                 # --cache-ram bounds the secondary prompt cache; live slot checkpoints use process RAM.
                 # --kv-unified is mainline-only and compatible with MTP (single shared KV pool).
-                $promptCacheRam = if ($useModel -in @("qwen38_27b_unsloth_q6k_mtp","qwen38_27b_nvfp4_q8attn_mtp","qwen36_27b_autoround_q6_mtp","qwen36_27b_bartowski_q6kl_mtp")) { "32768" } else { "16384" }
+                $promptCacheRam = "32768"
                 $llamaArgs += @("--kv-unified", "--ctx-checkpoints", "32", "--checkpoint-min-step", "2048", "--cache-ram", $promptCacheRam, "--no-context-shift")
             } else {
                 $llamaArgs += @("--kv-unified", "--ctx-checkpoints", "32", "--checkpoint-min-step", "1024", "--cache-ram", "16384", "--no-context-shift")
             }
-            if ($useModel -in @("qwen36_27b_bee_q5","qwen36_27b_bee_q6")) {
-                $llamaArgs += @("--spec-type", "dflash")
+            if ($useModel -eq "qwen38_27b_unsloth_q6k_dflash2") {
+                # DFlash2 (mainline, b10658+): drafter externo incoai Q4_K_M + ngram-map-k4v.
+                # n-max 5 (optimo medido; hard-cap 7 por block_size=8 del GGUF).
+                # Sin draft-mtp en spec-type, load_mtp=false -> la capa MTP blk.64 no
+                # se mapea en absoluto (TENSOR_SKIP en el loader): ~400 MiB vs MTP.
+                $llamaArgs += @("--spec-type", "draft-dflash,ngram-map-k4v")
                 $llamaArgs += @("--spec-draft-model", $draftModelFile)
                 $llamaArgs += @("--spec-draft-ngl", "all")
-                $llamaArgs += @("--spec-dflash-cross-ctx", "1024")
-                $llamaArgs += @("--spec-draft-n-max", "16", "--spec-dm-controller", "profit")
-                $llamaArgs += @("--cache-type-k", "turbo4", "--cache-type-v", "turbo3_tcq")
-                $llamaArgs += @("--no-mmproj-offload")
-                $llamaArgs += @("--log-verbosity", "2", "--perf", "--metrics", "--log-timestamps", "--log-prefix")
-                $beeDflashLogEnv = @{
-                    GGML_DFLASH_PROFILE = "summary"
-                }
-                foreach ($kv in $beeDflashLogEnv.GetEnumerator()) {
-                    [Environment]::SetEnvironmentVariable($kv.Key, $kv.Value, "Process")
-                    $llamaLaunchEnv[$kv.Key] = $kv.Value
-                }
-                Write-Host "  BeeLlama DFlash activado (draft Q4_K_M, KV turbo4/turbo3_tcq, parallel=1, logs resumen)" -ForegroundColor Cyan
-            } elseif ($useModel -in @("qwen38_27b_unsloth_q6k_mtp","qwen38_27b_nvfp4_q8attn_mtp","qwen36_27b","qwen36_27b_q6","qwen36_27b_q4_mtp","qwen36_27b_q5_mtp","qwen36_27b_q6_mtp","qwen36_27b_autoround_q6_mtp","qwen36_27b_bartowski_q6kl_mtp")) {
-                if ($useLlamaInstall -eq "ik_llama" -and $useModel -eq "qwen36_27b_q6") {
-                    # Q6_0 KV cache (ik_llama exclusive low-perp variant) — leaves headroom for MTP draft
-                    $llamaArgs += @("-ctk", "q6_0", "-ctv", "q6_0")
-                } elseif ($useModel -in @("qwen36_27b_q4_mtp","qwen36_27b_q5_mtp")) {
-                    $llamaArgs += @("-ctk", "q8_0", "-ctv", "q8_0")
-                } elseif ($useModel -in @("qwen38_27b_unsloth_q6k_mtp","qwen38_27b_nvfp4_q8attn_mtp","qwen36_27b_autoround_q6_mtp","qwen36_27b_bartowski_q6kl_mtp")) {
-                    # AutoRound pesa ~1.9 GB menos -> usamos ese margen para subir el KV a
-                    # K q8_0 / V q5_1 (mejor recall fino).
-                    $llamaArgs += @("-ctk", "q8_0", "-ctv", "q5_1")
-                } elseif ($useModel -eq "qwen36_27b_q6_mtp") {
-                    # K/V invertidos vs q4_0/q5_1: mismos bytes pero la mayor precision (q5_1) va a K, que es mas sensible
-                    $llamaArgs += @("-ctk", "q5_1", "-ctv", "q4_0")
-                } else {
-                    $llamaArgs += @("-ctk", "q8_0", "-ctv", "q8_0")
-                }
-            }
-            # Estos perfiles mantienen el encoder de vision en CPU para reservar VRAM al KV.
-            if ($useModel -in @("qwen36_27b_q6","qwen36_27b_q4_mtp","qwen36_27b_q5_mtp") -and $useLlamaInstall -ne "ik_llama") {
-                # --no-mmproj-offload doesn't exist in ik_llama
-                $llamaArgs += @("--no-mmproj-offload")
+                $llamaArgs += @("--spec-draft-n-max", "5")
+                # Mantener el mismo KV cuantizado que el perfil MTP. Este flag debe vivir
+                # aquí: la rama DFlash2 es exclusiva y no alcanza el bloque KV de MTP.
+                # Sin estos flags llama.cpp usa el KV por defecto y derrama ~4 GiB a RAM.
+                $llamaArgs += @("-ctk", "q8_0", "-ctv", "q5_1")
+                Write-Host "  DFlash2 activado (draft Q4_K_M + ngram-map-k4v, n-max 5, KV q8_0/q5_1, capa MTP no cargada)" -ForegroundColor Cyan
+            } elseif ($useModel -in @("qwen38_27b_unsloth_q6k_mtp","qwen38_27b_nvfp4_q8attn_mtp")) {
+                # Q6_K de Qwen3.8 -> KV K q8_0 / V q5_1 (mejor recall fino).
+                $llamaArgs += @("-ctk", "q8_0", "-ctv", "q5_1")
             }
             # MTP (Multi-Token Prediction) — upstream llama.cpp mainline draft-mtp mode.
             if ($env:OPENCLAW_LLAMA_MTP_ENABLED -eq "1") {
@@ -430,13 +326,6 @@ else {
                     Write-Host "  MTP + ngram-mod activados (--spec-type draft-mtp,ngram-mod --spec-draft-n-max $($env:OPENCLAW_LLAMA_MTP_DRAFT_N_MAX), p-min $($env:OPENCLAW_LLAMA_MTP_DRAFT_P_MIN), draft KV F16 + --spec-default)" -ForegroundColor Cyan
                 }
             }
-        }
-        elseif ($useModel -eq "qwen35") {
-            $chatTemplateFile = Join-Path $openclawRoot "models\qwen35-27b\chat-template.jinja"
-            $llamaArgs += @("--ubatch-size", "2048")
-            $llamaArgs += @("--chat-template-file", $chatTemplateFile)
-            $llamaArgs += @("--kv-unified", "--ctx-checkpoints", "32")
-            $llamaArgs += @("--swa-full")
         }
         if ($useModel -eq "gemma4") {
             $llamaArgs += @("--ubatch-size", "512")
@@ -736,17 +625,14 @@ if ($brokerScript) {
             if ($llamaLogFile) { $env:OPENCLAW_LLAMA_LOG_FILE = $llamaLogFile }
             $env:OPENCLAW_LLAMA_PORT = [string]$llamaPort
             $env:OPENCLAW_LLAMA_CTX_SIZE = $ctxSize
-            $env:OPENCLAW_LLAMA_PARALLEL = if ($useModel -in @("qwen38_27b_unsloth_q6k_mtp","qwen38_27b_nvfp4_q8attn_mtp","qwen36_27b_bee_q5","qwen36_27b_bee_q6","qwen36_27b_q4_mtp","qwen36_27b_q5_mtp","qwen36_27b_q6_mtp","qwen36_27b_autoround_q6_mtp","qwen36_27b_bartowski_q6kl_mtp")) { "1" } else { "2" }
+            $env:OPENCLAW_LLAMA_PARALLEL = if ($useModel -in @("qwen38_27b_unsloth_q6k_mtp","qwen38_27b_unsloth_q6k_dflash2","qwen38_27b_nvfp4_q8attn_mtp")) { "1" } else { "2" }
             $env:OPENCLAW_LLAMA_N_GPU_LAYERS = "99"
             $env:OPENCLAW_LLAMA_BATCH_SIZE = "2048"
             $env:OPENCLAW_LLAMA_PROFILE = $useModel
-            if ($useModel -in @("qwen38_27b_unsloth_q6k_mtp","qwen38_27b_nvfp4_q8attn_mtp","qwen36","qwen36q4","qwen36_27b_bee_q5","qwen36_27b_bee_q6","qwen36_27b","qwen36_27b_q6","qwen36_27b_q4_mtp","qwen36_27b_q5_mtp","qwen36_27b_q6_mtp","qwen36_27b_autoround_q6_mtp","qwen36_27b_bartowski_q6kl_mtp")) {
-                $env:OPENCLAW_LLAMA_UBATCH_SIZE = if ($useModel -in @("qwen38_27b_unsloth_q6k_mtp","qwen38_27b_nvfp4_q8attn_mtp","qwen36_27b_q6_mtp","qwen36_27b_autoround_q6_mtp","qwen36_27b_bartowski_q6kl_mtp")) { "1024" } else { "2048" }
+            if ($useModel -in @("qwen38_27b_unsloth_q6k_mtp","qwen38_27b_unsloth_q6k_dflash2","qwen38_27b_nvfp4_q8attn_mtp")) {
+                $env:OPENCLAW_LLAMA_UBATCH_SIZE = "1024"
                 $env:OPENCLAW_LLAMA_CTX_CHECKPOINTS = "32"
-                $env:OPENCLAW_LLAMA_CHAT_TEMPLATE = if ($useModel -in @("qwen38_27b_unsloth_q6k_mtp","qwen38_27b_nvfp4_q8attn_mtp")) { "" } else { Join-Path $openclawRoot "models\qwen36-27b\qwen3.6-enhanced.jinja" }
-            } elseif ($useModel -eq "qwen35") {
-                $env:OPENCLAW_LLAMA_UBATCH_SIZE = "2048"
-                $env:OPENCLAW_LLAMA_CTX_CHECKPOINTS = "32"
+                $env:OPENCLAW_LLAMA_CHAT_TEMPLATE = ""
             } else {
                 $env:OPENCLAW_LLAMA_UBATCH_SIZE = "512"
             }

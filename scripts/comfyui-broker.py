@@ -307,14 +307,14 @@ class BrokerConfig:
             llama_log_file=optional_path("OPENCLAW_LLAMA_LOG_FILE"),
             broker_log_file=optional_path("OPENCLAW_BROKER_LOG_FILE"),
             llama_slot_save_path=slot_save_path,
-            llama_ctx_size=env_int("OPENCLAW_LLAMA_CTX_SIZE", 131072),
+            llama_ctx_size=env_int("OPENCLAW_LLAMA_CTX_SIZE", 130000),
             llama_parallel=env_int("OPENCLAW_LLAMA_PARALLEL", 1),
             llama_n_gpu_layers=env_int("OPENCLAW_LLAMA_N_GPU_LAYERS", 99),
             llama_batch_size=env_int("OPENCLAW_LLAMA_BATCH_SIZE", 4096),
             llama_ubatch_size=env_int("OPENCLAW_LLAMA_UBATCH_SIZE", 4096),
             llama_ctx_checkpoints=env_int("OPENCLAW_LLAMA_CTX_CHECKPOINTS", 32),
             llama_slot_min_tokens=env_int("OPENCLAW_LLAMA_SLOT_MIN_TOKENS", 200),
-            llama_profile=os.environ.get("OPENCLAW_LLAMA_PROFILE", "qwen35").strip().lower(),
+            llama_profile=os.environ.get("OPENCLAW_LLAMA_PROFILE", "qwen38_27b_unsloth_q6k_mtp").strip().lower(),
             llama_temp=os.environ.get("OPENCLAW_LLAMA_TEMP", "0.6"),
             llama_top_p=os.environ.get("OPENCLAW_LLAMA_TOP_P", "0.95"),
             llama_top_k=os.environ.get("OPENCLAW_LLAMA_TOP_K", "20"),
@@ -827,8 +827,8 @@ class BrokerState:
         self.config.llama_slot_save_path.mkdir(parents=True, exist_ok=True)
 
         profile = self.config.llama_profile
-        if profile not in {"qwen35", "qwen38_27b_unsloth_q6k_mtp", "qwen38_27b_nvfp4_q8attn_mtp", "qwen36", "qwen36q4", "qwen36_27b_bee_q5", "qwen36_27b_bee_q6", "qwen36_27b", "qwen36_27b_q6", "qwen36_27b_q4_mtp", "qwen36_27b_q5_mtp", "qwen36_27b_q6_mtp", "qwen36_27b_autoround_q6_mtp", "qwen36_27b_bartowski_q6kl_mtp", "gemma4"}:
-            profile = "qwen35"
+        if profile not in {"qwen38_27b_unsloth_q6k_mtp", "qwen38_27b_unsloth_q6k_dflash2", "qwen38_27b_nvfp4_q8attn_mtp", "gemma4"}:
+            profile = "qwen38_27b_unsloth_q6k_mtp"
 
         is_ik_llama = "ik_llama" in str(self.config.llama_server_exe.parent)
 
@@ -837,7 +837,7 @@ class BrokerState:
             "--model",
             str(self.config.llama_model),
             "--alias",
-            f"{'qwen3.8-27b' if profile in ('qwen38_27b_unsloth_q6k_mtp', 'qwen38_27b_nvfp4_q8attn_mtp') else 'qwen3.6-27b'},{profile}",
+            f"{'qwen3.8-27b' if profile.startswith('qwen38_') else 'gemma4-31b'},{profile}",
         ]
 
         if self.config.llama_mmproj and self.config.llama_mmproj.exists():
@@ -867,41 +867,19 @@ class BrokerState:
         )
 
         # Keep restart args aligned with start-hermes.ps1 profile branches.
-        if profile == "qwen35":
-            args.extend(["--ubatch-size", str(self.config.llama_ubatch_size)])
-            if self.config.llama_chat_template and self.config.llama_chat_template.exists():
-                args.extend(["--chat-template-file", str(self.config.llama_chat_template)])
-            if is_ik_llama:
-                args.extend(["--ctx-checkpoints", str(self.config.llama_ctx_checkpoints), "--swa-full"])
-            else:
-                args.extend(["--kv-unified", "--ctx-checkpoints", str(self.config.llama_ctx_checkpoints), "--swa-full"])
-        elif profile in ("qwen38_27b_unsloth_q6k_mtp", "qwen38_27b_nvfp4_q8attn_mtp", "qwen36", "qwen36q4", "qwen36_27b_bee_q5", "qwen36_27b_bee_q6", "qwen36_27b", "qwen36_27b_q6", "qwen36_27b_q4_mtp", "qwen36_27b_q5_mtp", "qwen36_27b_q6_mtp", "qwen36_27b_autoround_q6_mtp", "qwen36_27b_bartowski_q6kl_mtp"):
-            # Qwen3.6/3.8 family: jinja, reasoning on, thinking enabled
+        if profile in ("qwen38_27b_unsloth_q6k_mtp", "qwen38_27b_unsloth_q6k_dflash2", "qwen38_27b_nvfp4_q8attn_mtp"):
+            # Qwen3.8 family: jinja, reasoning on, thinking enabled
             args.extend(["--ubatch-size", str(self.config.llama_ubatch_size)])
             args.extend(["--jinja", "--reasoning", "on"])
-            if profile in ("qwen38_27b_unsloth_q6k_mtp", "qwen38_27b_nvfp4_q8attn_mtp"):
+            if profile in ("qwen38_27b_unsloth_q6k_mtp", "qwen38_27b_unsloth_q6k_dflash2", "qwen38_27b_nvfp4_q8attn_mtp"):
                 args.append("--reasoning-preserve")
             if self.config.llama_chat_template and self.config.llama_chat_template.exists():
                 args.extend(["--chat-template-file", str(self.config.llama_chat_template)])
             args.extend(["--image-min-tokens", "1024"])
             args.extend(["--image-max-tokens", "1024"])
-            if profile in ("qwen38_27b_unsloth_q6k_mtp", "qwen38_27b_nvfp4_q8attn_mtp", "qwen36_27b", "qwen36_27b_q6", "qwen36_27b_q4_mtp", "qwen36_27b_q5_mtp", "qwen36_27b_q6_mtp", "qwen36_27b_autoround_q6_mtp", "qwen36_27b_bartowski_q6kl_mtp"):
-                # Q6_0 KV (ik_llama low-perp) when MTP is on q6 model — fits 131k ctx with parallel 4 + MTP
-                if self.config.llama_mtp_enabled and profile == "qwen36_27b_q6":
-                    args.extend(["-ctk", "q6_0", "-ctv", "q6_0"])
-                elif profile in ("qwen36_27b_q4_mtp", "qwen36_27b_q5_mtp"):
-                    args.extend(["-ctk", "q8_0", "-ctv", "q8_0"])
-                elif profile in ("qwen38_27b_unsloth_q6k_mtp", "qwen38_27b_nvfp4_q8attn_mtp", "qwen36_27b_autoround_q6_mtp", "qwen36_27b_bartowski_q6kl_mtp"):
-                    # High-quality Q6 profiles use K q8_0 / V q5_1 for better fine recall.
-                    args.extend(["-ctk", "q8_0", "-ctv", "q5_1"])
-                elif profile == "qwen36_27b_q6_mtp":
-                    # K/V invertidos vs q4_0/q5_1: mismos bytes pero la mayor precision (q5_1) va a K, que es mas sensible
-                    args.extend(["-ctk", "q5_1", "-ctv", "q4_0"])
-                else:
-                    args.extend(["-ctk", "q8_0", "-ctv", "q8_0"])  # Q8_0 KV cache + Hadamard rotations
-            # Keep vision on CPU only for profiles that reserve their VRAM headroom for KV.
-            if profile in ("qwen36_27b_q6", "qwen36_27b_q4_mtp", "qwen36_27b_q5_mtp") and not is_ik_llama:
-                args.extend(["--no-mmproj-offload"])  # keep vision encoder on CPU to save VRAM (mainline only)
+            if profile in ("qwen38_27b_unsloth_q6k_mtp", "qwen38_27b_nvfp4_q8attn_mtp"):
+                # Q6_K de Qwen3.8 -> KV K q8_0 / V q5_1 (mejor recall fino).
+                args.extend(["-ctk", "q8_0", "-ctv", "q5_1"])
             # Sampling params from env vars (set by start-hermes.ps1)
             args.extend(["--presence-penalty", self.config.llama_presence_penalty])
             args.extend(["--min-p", self.config.llama_min_p, "--predict", self.config.llama_predict])
@@ -913,14 +891,10 @@ class BrokerState:
                               "--ctx-checkpoints-interval", "1024", "--cache-ram", "16384",
                               "--no-context-shift"])
             else:
-                if profile in ("qwen36_27b_bee_q5", "qwen36_27b_bee_q6"):
-                    args.extend(["--kv-unified", "--ctx-checkpoints", str(self.config.llama_ctx_checkpoints),
-                                  "--checkpoint-min-step", "8192", "--cache-ram", "32768",
-                                  "--no-context-shift", "--no-cache-idle-slots"])
-                elif self.config.llama_mtp_enabled:
-                    # Mainline MTP: 2k spacing retains a broader span of long agentic histories
-                    # within the checkpoint limit while keeping rollback reasonably fine-grained.
-                    prompt_cache_ram = "32768" if profile in ("qwen38_27b_unsloth_q6k_mtp", "qwen38_27b_nvfp4_q8attn_mtp", "qwen36_27b_autoround_q6_mtp", "qwen36_27b_bartowski_q6kl_mtp") else "16384"
+                if self.config.llama_mtp_enabled or profile == "qwen38_27b_unsloth_q6k_dflash2":
+                    # Mainline speculative profiles: 2k spacing retains a broader span of
+                    # long agentic histories while keeping rollback reasonably fine-grained.
+                    prompt_cache_ram = "32768"
                     args.extend(["--kv-unified", "--ctx-checkpoints", str(self.config.llama_ctx_checkpoints),
                                   "--checkpoint-min-step", "2048", "--cache-ram", prompt_cache_ram,
                                   "--no-context-shift"])
@@ -928,19 +902,16 @@ class BrokerState:
                     args.extend(["--kv-unified", "--ctx-checkpoints", str(self.config.llama_ctx_checkpoints),
                                   "--checkpoint-min-step", "1024", "--cache-ram", "16384",
                                   "--no-context-shift"])
-            if profile in ("qwen36_27b_bee_q5", "qwen36_27b_bee_q6"):
-                if self.config.llama_draft_model and self.config.llama_draft_model.exists():
-                    args.extend(["--spec-type", "dflash"])
-                    args.extend(["--spec-draft-model", str(self.config.llama_draft_model)])
-                    args.extend(["--spec-draft-ngl", "all"])
-                    args.extend(["--spec-dflash-cross-ctx", "1024"])
-                    args.extend(["--spec-draft-n-max", "16", "--spec-dm-controller", "profit"])
-                args.extend(["--cache-type-k", "turbo4", "--cache-type-v", "turbo3_tcq"])
-                args.extend(["--no-mmproj-offload"])
-                args.extend(["--log-verbosity", "2", "--perf", "--metrics", "--log-timestamps", "--log-prefix"])
+            if profile == "qwen38_27b_unsloth_q6k_dflash2":
+                if not self.config.llama_draft_model or not self.config.llama_draft_model.exists():
+                    raise RuntimeError("DFlash2 draft model is missing; refusing to restart llama-server without speculation")
+                args.extend(["--spec-type", "draft-dflash,ngram-map-k4v"])
+                args.extend(["--spec-draft-model", str(self.config.llama_draft_model)])
+                args.extend(["--spec-draft-ngl", "all"])
+                args.extend(["--spec-draft-n-max", "5"])
             # MTP (Multi-Token Prediction). Upstream llama.cpp uses draft-mtp;
             # ik_llama used the older -mtp spelling.
-            if self.config.llama_mtp_enabled and profile in ("qwen38_27b_unsloth_q6k_mtp", "qwen38_27b_nvfp4_q8attn_mtp", "qwen36_27b", "qwen36_27b_q6", "qwen36_27b_q4_mtp", "qwen36_27b_q5_mtp", "qwen36_27b_q6_mtp", "qwen36_27b_autoround_q6_mtp", "qwen36_27b_bartowski_q6kl_mtp"):
+            if self.config.llama_mtp_enabled and profile in ("qwen38_27b_unsloth_q6k_mtp", "qwen38_27b_nvfp4_q8attn_mtp"):
                 if is_ik_llama:
                     args.extend(["-mtp", "--draft-max", self.config.llama_mtp_draft_n_max])
                 else:
@@ -961,23 +932,17 @@ class BrokerState:
         # 2026-08-19: llama.cpp solo respeta LLAMA_ARG_CHAT_TEMPLATE_KWARGS (la variable
         # vieja LLAMA_CHAT_TEMPLATE_KWARGS sin _ARG era ignorada -> el server quedaba en
         # el default de la plantilla, xhigh). Se añade el flag CLI --chat-template-kwargs
-        # para que sea visible en la linea de comandos. Default qwen38: medium.
+        # para que sea visible en la linea de comandos. Default qwen38: xhigh.
         extra_env: dict[str, str] = {}
-        if profile in ("qwen38_27b_unsloth_q6k_mtp", "qwen38_27b_nvfp4_q8attn_mtp"):
-            _chat_template_kwargs = '{"enable_thinking":true,"preserve_thinking":true,"reasoning_effort":"medium"}'
-        elif profile in ("qwen36", "qwen36q4", "qwen36_27b_bee_q5", "qwen36_27b_bee_q6", "qwen36_27b", "qwen36_27b_q6", "qwen36_27b_q4_mtp", "qwen36_27b_q5_mtp", "qwen36_27b_q6_mtp", "qwen36_27b_autoround_q6_mtp", "qwen36_27b_bartowski_q6kl_mtp"):
-            _chat_template_kwargs = '{"preserve_thinking":true,"tool_call_format":"xml"}'
+        if profile == "qwen38_27b_unsloth_q6k_dflash2":
+            _chat_template_kwargs = '{"enable_thinking":true,"preserve_thinking":true,"reasoning_effort":"xhigh"}'
+        elif profile in ("qwen38_27b_unsloth_q6k_mtp", "qwen38_27b_nvfp4_q8attn_mtp"):
+            _chat_template_kwargs = '{"enable_thinking":true,"preserve_thinking":true,"reasoning_effort":"xhigh"}'
         else:
             _chat_template_kwargs = None
         if _chat_template_kwargs:
             args.extend(["--chat-template-kwargs", _chat_template_kwargs])
             extra_env["LLAMA_ARG_CHAT_TEMPLATE_KWARGS"] = _chat_template_kwargs
-        if profile in ("qwen36_27b_bee_q5", "qwen36_27b_bee_q6"):
-            extra_env.update(
-                {
-                    "GGML_DFLASH_PROFILE": "summary",
-                }
-            )
 
         if _WT_EXE:
             # Launch as a new tab in the existing Windows Terminal window.

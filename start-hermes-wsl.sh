@@ -8,7 +8,7 @@ set -euo pipefail
 # Ensure ~/.local/bin is on PATH (uv, hermes, etc.)
 export PATH="$HOME/.local/bin:$PATH"
 
-USE_MODEL="${USE_MODEL:-qwen36_27b}"
+USE_MODEL="${USE_MODEL:-qwen38_27b_unsloth_q6k_mtp}"
 USE_BROWSER_TOOL="${USE_BROWSER_TOOL:-on}"
 USE_TAILSCALE="${USE_TAILSCALE:-off}"
 
@@ -71,8 +71,21 @@ wait_for_llama_server() {
 # own gateway loop kept colliding with it ("Another gateway instance is
 # already running"), crash-looping 5x and aborting (#issue: post-update
 # gateway restart deadlock). Match both invocation shapes.
+#
+# 2026-09-01 fix: pkill -f matched FULL COMMAND LINES — so ANY agent terminal
+# command containing the literal string "hermes gateway" (e.g. diagnostics
+# like `ps aux | grep "hermes gateway"`) was SIGTERM-killed every time the
+# launcher loop restarted the gateway. That made the agent's own commands
+# die mid-execution during crash loops. Use `pkill -x hermes` (exact
+# comm/name match: only the real gateway wrapper process) plus a targeted
+# -f pattern that is specific enough not to match diagnostics.
 kill_stale_gateway() {
-  pkill -f 'hermes_cli\.main gateway|hermes gateway' 2>/dev/null || true
+  # Exact-name: only the real `hermes` wrapper binary (never agent terminals).
+  pkill -x hermes 2>/dev/null || true
+  # Venv-direct invocation (Desktop app restart-after-update path). The pattern
+  # matches the venv python running the hermes entrypoint — specific enough
+  # that diagnostic commands (grep/pkill themselves) don't match it.
+  pkill -f '[h]ermes-agent/venv/bin/python3.*hermes gateway' 2>/dev/null || true
 }
 
 cleanup() {
@@ -114,16 +127,6 @@ echo ""
 case "${USE_MODEL}" in
   qwen38_27b_unsloth_q6k_mtp) CTX_LEN=140000 ;;
   qwen38_27b_nvfp4_q8attn_mtp) CTX_LEN=230000 ;;
-  qwen36_27b_bee_q5) CTX_LEN=262144 ;;
-  qwen36_27b_bee_q6) CTX_LEN=191608 ;;
-  qwen36_27b)      CTX_LEN=200000 ;;
-  qwen36q4)        CTX_LEN=200000 ;;
-  qwen36)          CTX_LEN=100000 ;;
-  qwen36_27b_q6)   CTX_LEN=131072 ;;
-  qwen36_27b_q4_mtp) CTX_LEN=150000 ;;
-  qwen36_27b_q5_mtp) CTX_LEN=130000 ;;
-  qwen36_27b_q6_mtp) CTX_LEN=170000 ;;
-  qwen36_27b_autoround_q6_mtp) CTX_LEN=150000 ;;
   gemma4)          CTX_LEN=100000 ;;
   *)               CTX_LEN=131072 ;;
 esac
@@ -132,9 +135,9 @@ if [[ -f "$HERMES_CONFIG" ]]; then
   sed -i "s/  context_length: .*/  context_length: ${CTX_LEN}/" "$HERMES_CONFIG"
   echo "[config] context_length actualizado a ${CTX_LEN}"
   case "${USE_MODEL}" in
-    qwen38_27b_unsloth_q6k_mtp) MODEL_ALIAS="qwen3.8-27b" ;;
-    qwen38_27b_nvfp4_q8attn_mtp) MODEL_ALIAS="qwen3.8-27b" ;;
-    *)                        MODEL_ALIAS="qwen3.6-27b" ;;
+    qwen38_27b_*)          MODEL_ALIAS="qwen3.8-27b" ;;
+    gemma4)                MODEL_ALIAS="gemma4-31b" ;;
+    *)                     MODEL_ALIAS="qwen3.8-27b" ;;
   esac
   if grep -q '^model:' "$HERMES_CONFIG"; then
     sed -i "0,/^  default: .*/s//  default: ${MODEL_ALIAS}/" "$HERMES_CONFIG"
