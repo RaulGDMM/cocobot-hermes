@@ -13,9 +13,15 @@ USE_BROWSER_TOOL="${USE_BROWSER_TOOL:-on}"
 USE_TAILSCALE="${USE_TAILSCALE:-off}"
 
 LLAMA_PORT=30000
+IS_STRATA=0
+if [[ "${USE_MODEL}" == "qwen38_flashnext_nvfp4" ]]; then
+  IS_STRATA=1
+  LLAMA_PORT=8097
+fi
 # Resolve Windows host IP (WSL gateway) — replaces old host.docker.internal
 LLAMA_HOST="$(ip route show default | awk '{print $3}')"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+STRATA_START_CMD="$SCRIPT_DIR/../Openclaw/strata-nvfp4/strata-nvfp4/start-cocobot.cmd"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/scripts/load-copilot-work-account.sh"
 CLEANUP_DONE=0
@@ -43,22 +49,89 @@ resolve_hermes_runtime() {
 }
 
 wait_for_llama_server() {
-  echo "[hermes] Esperando a llama-server en ${LLAMA_HOST}:${LLAMA_PORT}..."
-  local max_wait=180
+  local name="llama-server" max_wait=180
+  if (( IS_STRATA )); then name="Strata"; max_wait=300; fi
+  echo "[hermes] Esperando a ${name} en ${LLAMA_HOST}:${LLAMA_PORT}..."
   local waited=0
   while (( waited < max_wait )); do
-    if curl -sf "http://${LLAMA_HOST}:${LLAMA_PORT}/health" >/dev/null 2>&1; then
-      echo "[OK] llama-server listo"
+    if (( IS_STRATA )); then
+      # Strata responde /health aunque el motor haya muerto: exigir loaded=true
+      if curl -sf "http://${LLAMA_HOST}:${LLAMA_PORT}/health" 2>/dev/null | grep -Eq '"loaded": ?true'; then
+        echo "[OK] ${name} listo"
+        return 0
+      fi
+    elif curl -sf "http://${LLAMA_HOST}:${LLAMA_PORT}/health" >/dev/null 2>&1; then
+      echo "[OK] ${name} listo"
       return 0
     fi
     sleep 3
     waited=$((waited + 3))
     if (( waited % 15 == 0 )); then
-      echo "  Esperando llama-server... (${waited}s)"
+      echo "  Esperando ${name}... (${waited}s)"
     fi
   done
-  echo "[!] llama-server no responde tras ${max_wait}s. Continuando de todas formas..."
+  echo "[!] ${name} no responde tras ${max_wait}s. Continuando de todas formas..."
   return 1
+}
+
+# Copia STRATA_API_KEY de start-cocobot.cmd (fuente de verdad) a ~/.hermes/.env
+sync_strata_api_key() {
+  local key env_file="$HOME/.hermes/.env"
+  key="$(grep -oE 'STRATA_API_KEY=[^"[:space:]]+' "$STRATA_START_CMD" 2>/dev/null | head -1 | cut -d= -f2 | tr -d '\r')"
+  if [[ -z "$key" ]]; then
+    echo "[!] No se encontro STRATA_API_KEY en $STRATA_START_CMD"
+    return 1
+  fi
+  touch "$env_file" && chmod 600 "$env_file"
+  if grep -q '^STRATA_API_KEY=' "$env_file"; then
+    sed -i "s|^STRATA_API_KEY=.*|STRATA_API_KEY=${key}|" "$env_file"
+  else
+    printf '\nSTRATA_API_KEY=%s\n' "$key" >> "$env_file"
+  fi
+  echo "[config] STRATA_API_KEY sincronizada en ~/.hermes/.env"
+}
+
+# Conmuta model/auxiliares entre custom:llama-server (:30000) y custom:strata (:8097).
+# El bloque custom_providers no se toca salvo para crear la entrada strata.
+switch_llm_backend() {
+  local target="$1"
+  SWITCH_TO="$target" LLAMA_HOST="$LLAMA_HOST" python3 - "$HOME/.hermes/config.yaml" <<'PY'
+import os, re, sys
+path = sys.argv[1]
+to_strata = os.environ["SWITCH_TO"] == "strata"
+host = os.environ["LLAMA_HOST"]
+with open(path, encoding="utf-8") as f:
+    lines = f.read().split("\n")
+out, in_cp, cp_idx, has_strata = [], False, None, False
+for line in lines:
+    if re.match(r"^\S", line):
+        in_cp = line.startswith("custom_providers:")
+        if in_cp:
+            cp_idx = len(out)
+    if in_cp:
+        if re.match(r"^\s*(-\s*)?name:\s*strata\s*$", line):
+            has_strata = True
+    elif to_strata:
+        line = line.replace("provider: custom:llama-server", "provider: custom:strata")
+        line = re.sub(r"(base_url: http://[^/:\s]+):30000/v1", r"\1:8097/v1", line)
+    else:
+        line = line.replace("provider: custom:strata", "provider: custom:llama-server")
+        line = re.sub(r"(base_url: http://[^/:\s]+):8097/v1", r"\1:30000/v1", line)
+    out.append(line)
+if not has_strata and cp_idx is not None:
+    out[cp_idx + 1:cp_idx + 1] = [
+        "  - api_key: ''",
+        "    api_mode: chat_completions",
+        f"    base_url: http://{host}:8097/v1",
+        "    key_env: STRATA_API_KEY",
+        "    models:",
+        "      - qwen3.8-flash-next-nvfp4",
+        "    name: strata",
+    ]
+with open(path, "w", encoding="utf-8") as f:
+    f.write("\n".join(out))
+print(f"[config] backend LLM -> custom:{'strata' if to_strata else 'llama-server'}")
+PY
 }
 
 # Kill any gateway process regardless of how it was invoked.  "hermes gateway
@@ -127,14 +200,22 @@ echo ""
 case "${USE_MODEL}" in
   qwen38_27b_unsloth_q6k_mtp) CTX_LEN=140000 ;;
   qwen38_27b_nvfp4_q8attn_mtp) CTX_LEN=230000 ;;
+  qwen38_flashnext_nvfp4) CTX_LEN=262144 ;;
   gemma4)          CTX_LEN=100000 ;;
   *)               CTX_LEN=131072 ;;
 esac
 HERMES_CONFIG="$HOME/.hermes/config.yaml"
 if [[ -f "$HERMES_CONFIG" ]]; then
+  if (( IS_STRATA )); then
+    sync_strata_api_key || true
+    switch_llm_backend strata
+  else
+    switch_llm_backend llama-server
+  fi
   sed -i "s/  context_length: .*/  context_length: ${CTX_LEN}/" "$HERMES_CONFIG"
   echo "[config] context_length actualizado a ${CTX_LEN}"
   case "${USE_MODEL}" in
+    qwen38_flashnext_nvfp4) MODEL_ALIAS="qwen3.8-flash-next-nvfp4" ;;
     qwen38_27b_*)          MODEL_ALIAS="qwen3.8-27b" ;;
     gemma4)                MODEL_ALIAS="gemma4-31b" ;;
     *)                     MODEL_ALIAS="qwen3.8-27b" ;;

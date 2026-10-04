@@ -12,12 +12,12 @@ param([switch]$LlamaOnly, [string]$Model)
 # MTP tampoco funciona con multimodal. Volver a ik_llama cuando ambos problemas esten resueltos.
 $useLlamaInstall = "stable"
 
-# Modelo LLM: "qwen38_27b_unsloth_q6k_mtp", "qwen38_27b_unsloth_q6k_dflash2", "qwen38_27b_nvfp4_q8attn_mtp", "gemma4"
+# Modelo LLM: "qwen38_27b_unsloth_q6k_mtp", "qwen38_27b_unsloth_q6k_dflash2", "qwen38_27b_nvfp4_q8attn_mtp", "gemma4", "qwen38_flashnext_nvfp4"
 # 2026-08-31: DFlash2 queda como perfil experimental tras el A/B; no usar como
 # default hasta que llama.cpp resuelva la corrupción del draft KV con mtmd (#27408).
-# Baseline MTP b10719:
-# ~/.hermes/benchmarks/llama-benchy/baseline-qwen38-mtp-b10719-20260831-145341.json
-$useModel = "qwen38_27b_unsloth_q6k_mtp"
+# 2026-10-04: Strata NVFP4 (Qwen3.8-Flash-Next 125B MoE, OrcaRouter uncensored, NVFP4 4.5-bit,
+# MTP integrado, low-RAM mode 64GB RAM, vision, ctx 262K, API en :8097).
+$useModel = "qwen38_flashnext_nvfp4"
 if ($Model) { $useModel = $Model }
 
 # Herramienta browser: $true para activarla, $false para desactivarla
@@ -45,6 +45,7 @@ if (-not $env:WT_SESSION) {
         $relaunchTitle = if ($LlamaOnly) { "Solo llama-server" } else { "Hermes Startup" }
         $extraArgs = @()
         if ($LlamaOnly) { $extraArgs = @("-LlamaOnly") }
+        if ($Model) { $extraArgs += @("-Model", $Model) }
         wt.exe new-tab --title $relaunchTitle -- powershell.exe -ExecutionPolicy Bypass -NoExit -File $scriptPath @extraArgs
         exit
     }
@@ -121,6 +122,23 @@ function Invoke-LlamaWarmup {
     }
 }
 
+# "loaded" | "dead" (HTTP vivo pero el motor strata.exe murio) | "down"
+function Get-StrataState {
+    param([int]$Port = 8097)
+    try {
+        $h = Invoke-RestMethod -Uri "http://localhost:${Port}/health" -Method Get -TimeoutSec 3 -ErrorAction Stop
+        if ($h.loaded) { return "loaded" } else { return "dead" }
+    } catch { return "down" }
+}
+
+function Stop-Strata {
+    param([int]$Port = 8097)
+    Get-CimInstance Win32_Process |
+        Where-Object { ($_.CommandLine -like "*serve.server*--engine strata*" -and $_.CommandLine -like "*--port $Port*") -or $_.Name -in @("strata.exe", "strata-vision.exe") } |
+        ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+    Start-Sleep -Seconds 2
+}
+
 function Get-LlamaInstallInfo {
     param([string]$InstallName)
     switch ($InstallName) {
@@ -163,8 +181,12 @@ if ($useModel -eq "qwen38_27b_unsloth_q6k_mtp") {
     $modelLabel    = "Gemma 4 31B-it UD-Q4_K_XL"
     $modelSize     = "17.5 GB, vision+thinking"
     $ctxSize       = "100000"
+} elseif ($useModel -eq "qwen38_flashnext_nvfp4") {
+    $modelLabel    = "Qwen3.8-Flash-Next OrcaRouter NVFP4 (Strata)"
+    $modelSize     = "73.9 GB native + 63 GiB experts + 1.3 GB embd + 51 GB PLE + 1.8 GB vision, MTP integrado, low-RAM mode, ctx 262K"
+    $ctxSize       = "262144"
 } else {
-    throw "Perfil de modelo desconocido: '$useModel'. Perfiles validos: qwen38_27b_unsloth_q6k_mtp, qwen38_27b_unsloth_q6k_dflash2, qwen38_27b_nvfp4_q8attn_mtp, gemma4."
+    throw "Perfil de modelo desconocido: '$useModel'. Perfiles validos: qwen38_27b_unsloth_q6k_mtp, qwen38_27b_unsloth_q6k_dflash2, qwen38_27b_nvfp4_q8attn_mtp, gemma4, qwen38_flashnext_nvfp4."
 }
 
 # Sampling params — single source of truth for both llama-server and broker restarts
@@ -207,17 +229,111 @@ if ($useModel -eq "qwen38_27b_unsloth_q6k_mtp") {
 } elseif ($useModel -eq "gemma4") {
     $modelFile    = Join-Path $openclawRoot "models\gemma4-31b\gemma-4-31B-it-UD-Q4_K_XL.gguf"
     $mmProjFile   = Join-Path $openclawRoot "models\gemma4-31b\mmproj-BF16.gguf"
+} elseif ($useModel -eq "qwen38_flashnext_nvfp4") {
+    # Strata NVFP4: no usa llama-server, usa su propio servidor en :8097
+    $modelFile    = Join-Path $openclawRoot "models\orca-nvfp4.gguf"
+    $mmProjFile   = Join-Path $openclawRoot "models\mmproj-orca-f32.gguf"
+    $pleFile      = Join-Path $openclawRoot "models\ple-fp8.gguf"
+    $embdFile     = Join-Path $openclawRoot "models\token-embd-bf16.gguf"
+    $expertsDir   = Join-Path $openclawRoot "strata-nvfp4\strata-nvfp4\pack"
+    $mtpDir       = Join-Path $openclawRoot "strata-nvfp4\strata-nvfp4\mtp-orca\rt"
+    $strataExe    = Join-Path $openclawRoot "strata-nvfp4\strata-nvfp4\engine\strata.exe"
+    $strataConfig = Join-Path $openclawRoot "strata-nvfp4\strata-nvfp4\config\cocobot.json"
+    $strataStartScript = Join-Path $openclawRoot "strata-nvfp4\strata-nvfp4\start-cocobot.cmd"
+    $strataPort   = 8097
+    # start-cocobot.cmd fija la key con la que arranca el servidor: es la fuente de verdad
+    $strataApiKeyPath = Join-Path $env:USERPROFILE ".hermes\secrets\strata-api-key"
+    $strataApiKey = $null
+    if (Test-Path $strataStartScript) {
+        $keyMatch = Select-String -Path $strataStartScript -Pattern 'STRATA_API_KEY=([^"\s]+)' | Select-Object -First 1
+        if ($keyMatch) { $strataApiKey = $keyMatch.Matches[0].Groups[1].Value }
+    }
+    if ($strataApiKey) {
+        $savedKey = Get-Content $strataApiKeyPath -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($savedKey -ne $strataApiKey) {
+            New-Item -ItemType Directory -Path (Split-Path $strataApiKeyPath) -Force | Out-Null
+            $strataApiKey | Set-Content $strataApiKeyPath -Encoding ASCII
+        }
+    }
 } else {
     throw "Perfil de modelo desconocido: '$useModel'."
 }
 $llamaPort = 30000
 
-if (-not (Test-Path $llamaServerExe)) {
+if ($useModel -eq "qwen38_flashnext_nvfp4") {
+    # Strata NVFP4: arranca su propio servidor en lugar de llama-server
+    if (-not (Test-Path $strataExe)) {
+        Write-Host "[!] No se encuentra strata.exe en $strataExe" -ForegroundColor Red
+    }
+    elseif (-not (Test-Path $strataConfig)) {
+        Write-Host "[!] No se encuentra la config de Strata en $strataConfig" -ForegroundColor Red
+    }
+    elseif (-not (Test-Path $modelFile)) {
+        Write-Host "[!] No se encuentra el modelo GGUF en $modelFile" -ForegroundColor Red
+    }
+    elseif (-not (Test-Path $mmProjFile)) {
+        Write-Host "[!] No se encuentra el mmproj en $mmProjFile" -ForegroundColor Red
+    }
+    elseif (-not (Test-Path $pleFile)) {
+        Write-Host "[!] No se encuentra la tabla PLE en $pleFile" -ForegroundColor Red
+    }
+    elseif (-not (Test-Path $embdFile)) {
+        Write-Host "[!] No se encuentran los embeddings en $embdFile" -ForegroundColor Red
+    }
+    elseif (-not (Test-Path $expertsDir)) {
+        Write-Host "[!] No se encuentra el directorio de expertos en $expertsDir" -ForegroundColor Red
+    }
+    elseif (-not (Test-Path $mtpDir)) {
+        Write-Host "[!] No se encuentra el directorio MTP en $mtpDir" -ForegroundColor Red
+    }
+    elseif (-not (Test-Path $strataStartScript)) {
+        Write-Host "[!] No se encuentra $strataStartScript" -ForegroundColor Red
+    }
+    elseif (-not $strataApiKey) {
+        Write-Host "[!] No se encuentra STRATA_API_KEY en $strataStartScript" -ForegroundColor Red
+    }
+    else {
+        $strataLogFile = Join-Path (Split-Path $strataStartScript) "strata.log"
+        # El gateway WSL llega a Strata por la IP del host: necesita regla de entrada como la de :30000
+        if (-not (Get-NetFirewallRule -DisplayName "Strata Server" -ErrorAction SilentlyContinue)) {
+            Write-Host "  Creando regla de firewall para :$strataPort (acceso desde WSL)..." -ForegroundColor DarkCyan
+            $fwCmd = "New-NetFirewallRule -DisplayName 'Strata Server' -Direction Inbound -Action Allow -Protocol TCP -LocalPort $strataPort | Out-Null"
+            $isAdminNow = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+            if ($isAdminNow) { Invoke-Expression $fwCmd }
+            else { Start-Process powershell -Verb RunAs -ArgumentList "-NoProfile -Command $fwCmd" -WindowStyle Hidden -Wait }
+        }
+        $strataState = Get-StrataState -Port $strataPort
+
+        if ($strataState -eq "loaded") {
+            Write-Host "[OK] Servidor Strata ya esta corriendo en puerto $strataPort" -ForegroundColor Green
+        }
+        else {
+            if ($strataState -eq "dead") {
+                Write-Host "[!] El servidor Strata responde en :$strataPort pero el motor no esta cargado. Reiniciando..." -ForegroundColor Yellow
+                Stop-Strata -Port $strataPort
+            }
+            Write-Host "[X] Servidor Strata no esta corriendo. Iniciando..." -ForegroundColor Red
+            Write-Host "  Modelo: $modelLabel ($modelSize)" -ForegroundColor Gray
+            Write-Host "  Contexto: $ctxSize tokens" -ForegroundColor Gray
+            if ($useWTTabs) {
+                wt.exe -w 0 new-tab --title "Strata Server :$strataPort" -- cmd /c "`"$strataStartScript`" & exit 0"
+            }
+            else {
+                Start-Process cmd.exe -ArgumentList "/c", "`"$strataStartScript`"" -WindowStyle Minimized
+            }
+            Write-Host "  Strata lanzado (modelo se carga en segundo plano, 1-3 min)" -ForegroundColor Gray
+            Write-Host "  Log: $strataLogFile" -ForegroundColor Gray
+            $llamaNeedsWarmup = $true
+        }
+    }
+}
+elseif (-not (Test-Path $llamaServerExe)) {
     Write-Host "[!] No se encuentra llama-server.exe en $llamaServerExe" -ForegroundColor Red
 }
 elseif (-not (Test-Path $modelFile)) {
     Write-Host "[!] No se encuentra el modelo GGUF en $modelFile" -ForegroundColor Red
-} elseif ($useModel -eq "qwen38_27b_unsloth_q6k_dflash2" -and -not (Test-Path $draftModelFile)) {
+}
+elseif ($useModel -eq "qwen38_27b_unsloth_q6k_dflash2" -and -not (Test-Path $draftModelFile)) {
     Write-Host "[!] No se encuentra el draft DFlash GGUF en $draftModelFile" -ForegroundColor Red
 }
 else {
@@ -357,8 +473,10 @@ Write-Host ""
 # -LlamaOnly: detenernos aqui. El resto (gateway, desktop backend, broker,
 # WebUI, port proxies...) no se toca.
 if ($LlamaOnly) {
+    $isStrata = $useModel -eq "qwen38_flashnext_nvfp4"
     if ($llamaNeedsWarmup) {
-        Write-Host "  Esperando a que llama-server cargue el modelo..." -ForegroundColor Yellow
+        $serverName = if ($isStrata) { "Strata" } else { "llama-server" }
+        Write-Host "  Esperando a que $serverName cargue el modelo..." -ForegroundColor Yellow
         $maxWait = 300
         $waited = 0
         $llamaReady = $false
@@ -366,7 +484,11 @@ if ($LlamaOnly) {
             Start-Sleep -Seconds 3
             $waited += 3
             try {
-                $null = Invoke-RestMethod -Uri "http://localhost:${llamaPort}/health" -Method Get -TimeoutSec 3 -ErrorAction Stop
+                if ($isStrata) {
+                    if ((Get-StrataState -Port $strataPort) -ne "loaded") { throw "not loaded" }
+                } else {
+                    $null = Invoke-RestMethod -Uri "http://localhost:${llamaPort}/health" -Method Get -TimeoutSec 3 -ErrorAction Stop
+                }
                 $llamaReady = $true
                 break
             } catch {}
@@ -375,7 +497,11 @@ if ($LlamaOnly) {
             }
         }
         if (-not $llamaReady) {
-            Write-Host "[!] llama-server no ha respondido en $maxWait s; revisa el log: $llamaLogFile" -ForegroundColor Yellow
+            $logHint = if ($isStrata) { $strataLogFile } else { $llamaLogFile }
+            Write-Host "[!] $serverName no ha respondido en $maxWait s; revisa el log: $logHint" -ForegroundColor Yellow
+        }
+        elseif ($isStrata) {
+            Write-Host "[OK] Strata listo (puerto $strataPort)" -ForegroundColor Green
         }
         else {
             Invoke-LlamaWarmup -Port $llamaPort
@@ -387,28 +513,39 @@ if ($LlamaOnly) {
         $mismatch = $false
         $runningIds = @()
         try {
-            $models = Invoke-RestMethod -Uri "http://localhost:${llamaPort}/v1/models" -Method Get -TimeoutSec 10
+            if ($isStrata) {
+                $models = Invoke-RestMethod -Uri "http://localhost:${strataPort}/v1/models" -Headers @{ Authorization = "Bearer $strataApiKey" } -Method Get -TimeoutSec 10
+            } else {
+                $models = Invoke-RestMethod -Uri "http://localhost:${llamaPort}/v1/models" -Method Get -TimeoutSec 10
+            }
             $runningIds = @($models.data | ForEach-Object { @($_.id); @($_.aliases) } | Where-Object { $_ })
-            $mismatch = -not ($useModel -in $runningIds)
+            $mismatch = -not ($useModel -in $runningIds -or ($isStrata -and "qwen3.8-flash-next-nvfp4" -in $runningIds))
         } catch {
             Write-Host "  [!] No se pudo consultar /v1/models para verificar el perfil" -ForegroundColor Yellow
         }
         if ($mismatch) {
-            Write-Host "[!] El llama-server corriendo en :$llamaPort NO es el perfil seleccionado" -ForegroundColor Yellow
+            Write-Host "[!] El servidor corriendo NO es el perfil seleccionado" -ForegroundColor Yellow
             Write-Host "    Corriendo: $($runningIds -join ', ')" -ForegroundColor Yellow
             Write-Host "    Pedido:   $useModel" -ForegroundColor Yellow
-            Write-Host "    Para usar el perfil correcto: Stop-Process -Name llama-server -Force" -ForegroundColor Yellow
-            Write-Host "    y reejecuta este acceso directo." -ForegroundColor Yellow
+            Write-Host "    Detenlo y reejecuta este acceso directo." -ForegroundColor Yellow
         }
         else {
-            Write-Host "[OK] El llama-server corriendo ya es el perfil seleccionado ($useModel)" -ForegroundColor Green
+            Write-Host "[OK] El servidor corriendo ya es el perfil seleccionado ($useModel)" -ForegroundColor Green
         }
     }
     Write-Host ""
     Write-Host "========================================" -ForegroundColor Magenta
-    Write-Host "  Solo llama-server" -ForegroundColor Magenta
-    Write-Host "  http://localhost:$llamaPort  ($modelLabel)" -ForegroundColor Gray
-    Write-Host "  Para detenerlo: Stop-Process -Name llama-server -Force" -ForegroundColor Gray
+    if ($isStrata) {
+        Write-Host "  Solo Strata Server" -ForegroundColor Magenta
+        Write-Host "  http://localhost:$strataPort  ($modelLabel)" -ForegroundColor Gray
+        Write-Host "  API Key en ~/.hermes/secrets/strata-api-key" -ForegroundColor Gray
+        Write-Host "  Para detenerlo: cierra la pestana 'Strata Server' o taskkill /F /IM strata.exe /IM strata-vision.exe" -ForegroundColor Gray
+    }
+    else {
+        Write-Host "  Solo llama-server" -ForegroundColor Magenta
+        Write-Host "  http://localhost:$llamaPort  ($modelLabel)" -ForegroundColor Gray
+        Write-Host "  Para detenerlo: Stop-Process -Name llama-server -Force" -ForegroundColor Gray
+    }
     Write-Host "========================================" -ForegroundColor Magenta
     Write-Host ""
     [Environment]::Exit(0)
@@ -613,29 +750,43 @@ if ($brokerScript) {
             $env:OPENCLAW_COMFYUI_APP_DIR = $expectedBrokerComfyAppDir
             if ($brokerModelPathsConfig -and (Test-Path $brokerModelPathsConfig)) { $env:OPENCLAW_COMFYUI_EXTRA_MODEL_PATHS_CONFIG = $brokerModelPathsConfig }
             $env:OPENCLAW_COMFYUI_HOST = "127.0.0.1"
-            $env:OPENCLAW_COMFYUI_PORT = "8000"
-            $env:OPENCLAW_USE_BACKEND = "llama-server"
+                        $env:OPENCLAW_COMFYUI_PORT = "8000"
+                        if ($useModel -eq "qwen38_flashnext_nvfp4") {
+                            $env:OPENCLAW_USE_BACKEND = "llama-server"
+                            $env:OPENCLAW_LLAMA_PORT = "8097"
+                            $env:OPENCLAW_LLAMA_CTX_SIZE = "262144"
+                            $strataApiKey = Get-Content (Join-Path $env:USERPROFILE ".hermes\secrets\strata-api-key") -ErrorAction SilentlyContinue
+                            if ($strataApiKey) { $env:OPENCLAW_LLAMA_API_KEY = $strataApiKey }
+                            $env:OPENCLAW_LLAMA_PARALLEL = "1"
+                            $env:OPENCLAW_LLAMA_N_GPU_LAYERS = "99"
+                            $env:OPENCLAW_LLAMA_BATCH_SIZE = "2048"
+                            $env:OPENCLAW_LLAMA_PROFILE = $useModel
+                            $env:OPENCLAW_LLAMA_UBATCH_SIZE = "1024"
+                        }
+                        else {
+                            $env:OPENCLAW_USE_BACKEND = "llama-server"
 
-            $env:OPENCLAW_LLAMA_SLOT_SAVE_PATH = Join-Path $openclawRoot "slot-cache"
-            $env:OPENCLAW_BROKER_LOG_FILE = Join-Path $openclawRoot "broker.log"
-            if ($llamaServerExe) { $env:OPENCLAW_LLAMA_SERVER_EXE = $llamaServerExe }
-            if ($modelFile) { $env:OPENCLAW_LLAMA_MODEL = $modelFile }
-            if ($mmProjFile) { $env:OPENCLAW_LLAMA_MMPROJ = $mmProjFile }
-            if ($draftModelFile) { $env:OPENCLAW_LLAMA_DRAFT_MODEL = $draftModelFile }
-            if ($llamaLogFile) { $env:OPENCLAW_LLAMA_LOG_FILE = $llamaLogFile }
-            $env:OPENCLAW_LLAMA_PORT = [string]$llamaPort
-            $env:OPENCLAW_LLAMA_CTX_SIZE = $ctxSize
-            $env:OPENCLAW_LLAMA_PARALLEL = if ($useModel -in @("qwen38_27b_unsloth_q6k_mtp","qwen38_27b_unsloth_q6k_dflash2","qwen38_27b_nvfp4_q8attn_mtp")) { "1" } else { "2" }
-            $env:OPENCLAW_LLAMA_N_GPU_LAYERS = "99"
-            $env:OPENCLAW_LLAMA_BATCH_SIZE = "2048"
-            $env:OPENCLAW_LLAMA_PROFILE = $useModel
-            if ($useModel -in @("qwen38_27b_unsloth_q6k_mtp","qwen38_27b_unsloth_q6k_dflash2","qwen38_27b_nvfp4_q8attn_mtp")) {
-                $env:OPENCLAW_LLAMA_UBATCH_SIZE = "1024"
-                $env:OPENCLAW_LLAMA_CTX_CHECKPOINTS = "32"
-                $env:OPENCLAW_LLAMA_CHAT_TEMPLATE = ""
-            } else {
-                $env:OPENCLAW_LLAMA_UBATCH_SIZE = "512"
-            }
+                            $env:OPENCLAW_LLAMA_SLOT_SAVE_PATH = Join-Path $openclawRoot "slot-cache"
+                            $env:OPENCLAW_BROKER_LOG_FILE = Join-Path $openclawRoot "broker.log"
+                            if ($llamaServerExe) { $env:OPENCLAW_LLAMA_SERVER_EXE = $llamaServerExe }
+                            if ($modelFile) { $env:OPENCLAW_LLAMA_MODEL = $modelFile }
+                            if ($mmProjFile) { $env:OPENCLAW_LLAMA_MMPROJ = $mmProjFile }
+                            if ($draftModelFile) { $env:OPENCLAW_LLAMA_DRAFT_MODEL = $draftModelFile }
+                            if ($llamaLogFile) { $env:OPENCLAW_LLAMA_LOG_FILE = $llamaLogFile }
+                            $env:OPENCLAW_LLAMA_PORT = [string]$llamaPort
+                            $env:OPENCLAW_LLAMA_CTX_SIZE = $ctxSize
+                            $env:OPENCLAW_LLAMA_PARALLEL = if ($useModel -in @("qwen38_27b_unsloth_q6k_mtp","qwen38_27b_unsloth_q6k_dflash2","qwen38_27b_nvfp4_q8attn_mtp")) { "1" } else { "2" }
+                            $env:OPENCLAW_LLAMA_N_GPU_LAYERS = "99"
+                            $env:OPENCLAW_LLAMA_BATCH_SIZE = "2048"
+                            $env:OPENCLAW_LLAMA_PROFILE = $useModel
+                            if ($useModel -in @("qwen38_27b_unsloth_q6k_mtp","qwen38_27b_unsloth_q6k_dflash2","qwen38_27b_nvfp4_q8attn_mtp")) {
+                                $env:OPENCLAW_LLAMA_UBATCH_SIZE = "1024"
+                                $env:OPENCLAW_LLAMA_CTX_CHECKPOINTS = "32"
+                                $env:OPENCLAW_LLAMA_CHAT_TEMPLATE = ""
+                            } else {
+                                $env:OPENCLAW_LLAMA_UBATCH_SIZE = "512"
+                            }
+                        }
 
             $brokerLauncher = Join-Path $PSHOME "powershell.exe"
             if (-not (Test-Path $brokerLauncher)) { $brokerLauncher = "powershell.exe" }
@@ -736,7 +887,8 @@ if ($useHermesWebUI) {
     if ($hwuiRunning) {
         Write-Host "[OK] Hermes WebUI ya esta corriendo en puerto $hermesWebUIPort" -ForegroundColor Green
     } elseif ($useWTTabs) {
-        $hwuiCmd = "cd /root/.hermes/hermes-agent && HERMES_WEBUI_HOST=0.0.0.0 exec venv/bin/python /root/hermes-webui/server.py"
+        $hwuiDir = "/mnt/" + $PSScriptRoot.Substring(0,1).ToLower() + ($PSScriptRoot.Substring(2) -replace '\\','/')
+        $hwuiCmd = "cd '$hwuiDir' && HERMES_WEBUI_HOST=0.0.0.0 exec bash ./start-hermes-webui.sh"
         wt.exe -w 0 new-tab --title "Hermes WebUI :$hermesWebUIPort" -- wsl.exe -d Ubuntu -- bash -lc $hwuiCmd
         Write-Host "[OK] Hermes WebUI lanzado en pestana WSL (puerto $hermesWebUIPort)" -ForegroundColor Green
         Write-Host "  URL: http://localhost:$hermesWebUIPort" -ForegroundColor Gray
@@ -821,40 +973,72 @@ if ($useOpenWebUI) {
 
 # Warm-up
 if ($llamaNeedsWarmup) {
-    Write-Host "  Esperando a que llama-server cargue el modelo..." -ForegroundColor Yellow
-    $maxWait = 180
-    $waited = 0
-    $llamaReady = $false
-    while ($waited -lt $maxWait) {
-        Start-Sleep -Seconds 3
-        $waited += 3
-        try {
-            $null = Invoke-RestMethod -Uri "http://localhost:${llamaPort}/health" -Method Get -TimeoutSec 3 -ErrorAction Stop
-            $llamaReady = $true
-            break
-        } catch {}
-        if ($waited % 15 -eq 0) {
-            Write-Host "  Cargando modelo... ($waited s)" -ForegroundColor Gray
+    if ($useModel -eq "qwen38_flashnext_nvfp4") {
+        Write-Host "  Esperando a que Strata cargue el modelo..." -ForegroundColor Yellow
+        $maxWait = 300
+        $waited = 0
+        $strataReady = $false
+        while ($waited -lt $maxWait) {
+            Start-Sleep -Seconds 5
+            $waited += 5
+            if ((Get-StrataState -Port $strataPort) -eq "loaded") {
+                $strataReady = $true
+                break
+            }
+            if ($waited % 30 -eq 0) {
+                Write-Host "  Cargando modelo... ($waited s)" -ForegroundColor Gray
+            }
+        }
+        if ($strataReady) {
+            Write-Host "[OK] Strata listo (puerto $strataPort)" -ForegroundColor Green
+        }
+        else {
+            Write-Host "[!] Strata puede seguir cargando; warm-up se hara con la primera peticion" -ForegroundColor Yellow
         }
     }
-    if ($llamaReady) {
-        Write-Host "[OK] llama-server listo (puerto $llamaPort)" -ForegroundColor Green
-        Invoke-LlamaWarmup -Port $llamaPort
-    }
     else {
-        Write-Host "[!] llama-server puede seguir cargando; warm-up se hara con la primera peticion" -ForegroundColor Yellow
+        Write-Host "  Esperando a que llama-server cargue el modelo..." -ForegroundColor Yellow
+        $maxWait = 180
+        $waited = 0
+        $llamaReady = $false
+        while ($waited -lt $maxWait) {
+            Start-Sleep -Seconds 3
+            $waited += 3
+            try {
+                $null = Invoke-RestMethod -Uri "http://localhost:${llamaPort}/health" -Method Get -TimeoutSec 3 -ErrorAction Stop
+                $llamaReady = $true
+                break
+            } catch {}
+            if ($waited % 15 -eq 0) {
+                Write-Host "  Cargando modelo... ($waited s)" -ForegroundColor Gray
+            }
+        }
+        if ($llamaReady) {
+            Write-Host "[OK] llama-server listo (puerto $llamaPort)" -ForegroundColor Green
+            Invoke-LlamaWarmup -Port $llamaPort
+        }
+        else {
+            Write-Host "[!] llama-server puede seguir cargando; warm-up se hara con la primera peticion" -ForegroundColor Yellow
+        }
     }
 }
 
 Write-Host ""
-Write-Host "========================================" -ForegroundColor Magenta
+Write-Host "=========================================" -ForegroundColor Magenta
 Write-Host "  Todos los servicios lanzados" -ForegroundColor Green
 Write-Host "  Hermes gateway corriendo en pestana WSL" -ForegroundColor Gray
 Write-Host "  Hermes Desktop backend: http://localhost:$hermesDesktopPort" -ForegroundColor Gray
+if ($useModel -eq "qwen38_flashnext_nvfp4") {
+    Write-Host "  Strata API: http://localhost:8097/v1  ($modelLabel)" -ForegroundColor Gray
+    Write-Host "  API Key: ~/.hermes/secrets/strata-api-key" -ForegroundColor Gray
+}
+else {
+    Write-Host "  llama-server: http://localhost:$llamaPort  ($modelLabel)" -ForegroundColor Gray
+}
 if ($useHermesWebUI) { Write-Host "  Hermes WebUI: https://localhost:8787" -ForegroundColor Gray }
 if ($useOpenWebUI) { Write-Host "  Open WebUI: http://localhost:8080" -ForegroundColor Gray }
 Write-Host "  Presiona Ctrl+C para detener todo" -ForegroundColor Gray
-Write-Host "========================================" -ForegroundColor Magenta
+Write-Host "=========================================" -ForegroundColor Magenta
 Write-Host ""
 
 # Keep alive + cleanup
@@ -863,7 +1047,12 @@ try {
 }
 finally {
     Write-Host ""
-    Write-Host "[cleanup] llama-server sigue corriendo (puerto $llamaPort). Para detenerlo: Stop-Process -Name llama-server -Force" -ForegroundColor Gray
+    if ($useModel -eq "qwen38_flashnext_nvfp4") {
+        Write-Host "[cleanup] Strata sigue corriendo (puerto 8097). Para detenerlo: taskkill /F /IM strata.exe /IM strata-vision.exe" -ForegroundColor Gray
+    }
+    else {
+        Write-Host "[cleanup] llama-server sigue corriendo (puerto $llamaPort). Para detenerlo: Stop-Process -Name llama-server -Force" -ForegroundColor Gray
+    }
     if ($brokerProcess -and -not $brokerProcess.HasExited) {
         Write-Host "[cleanup] Deteniendo broker ComfyUI (PID: $($brokerProcess.Id))..." -ForegroundColor Yellow
         Stop-Process -Id $brokerProcess.Id -Force -ErrorAction SilentlyContinue
