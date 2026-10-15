@@ -27,7 +27,9 @@ $useBrowserTool = $true
 $useOpenWebUI = $false
 
 # Hermes WebUI: $true para arrancar hermes-webui en puerto 8787 (WSL)
-$useHermesWebUI = $true
+# 2026-10-10: desactivado (fuera de casa -> Telegram, en casa -> Hermes Desktop).
+# Poner $true para volver a activarlo. Libera RAM al arranque para el budget de Strata.
+$useHermesWebUI = $false
 
 # Hermes Desktop backend: hermes serve en WSL, consumido por la app nativa Windows
 $hermesDesktopPort = 9119
@@ -255,6 +257,21 @@ if ($useModel -eq "qwen38_27b_unsloth_q6k_mtp") {
             $strataApiKey | Set-Content $strataApiKeyPath -Encoding ASCII
         }
     }
+    # Muestreo por defecto de Strata (2026-10-06). Sin bloque "sampling" Strata decodifica en
+    # greedy si la peticion no manda temperatura (Hermes no la manda) -> bucles en razonamientos
+    # largos. Valores recomendados por Qwen para thinking. Se aplican a cocobot.json en cada
+    # arranque, asi tambien los usa el broker cuando relanza Strata.
+    $strataSampling = [ordered]@{ temperature = 0.6; top_p = 0.95; top_k = 20 }
+    if (Test-Path $strataConfig) {
+        $cfgJson = Get-Content $strataConfig -Raw | ConvertFrom-Json
+        $cur = $cfgJson.sampling
+        $same = $cur -and ($cur.temperature -eq $strataSampling.temperature) -and ($cur.top_p -eq $strataSampling.top_p) -and ($cur.top_k -eq $strataSampling.top_k)
+        if (-not $same) {
+            $cfgJson | Add-Member -NotePropertyName sampling -NotePropertyValue ([pscustomobject]$strataSampling) -Force
+            $cfgJson | ConvertTo-Json -Depth 10 | Set-Content $strataConfig -Encoding UTF8
+            Write-Host "  Strata sampling por defecto -> temp 0.6, top_p 0.95, top_k 20" -ForegroundColor DarkCyan
+        }
+    }
 } else {
     throw "Perfil de modelo desconocido: '$useModel'."
 }
@@ -311,6 +328,23 @@ if ($useModel -eq "qwen38_flashnext_nvfp4") {
             if ($strataState -eq "dead") {
                 Write-Host "[!] El servidor Strata responde en :$strataPort pero el motor no esta cargado. Reiniciando..." -ForegroundColor Yellow
                 Stop-Strata -Port $strataPort
+            }
+            # 2026-10-10: vaciar working sets de procesos no criticos ANTES de lanzar
+            # Strata -> mas "RAM available" cuando el motor decide el budget.
+            # Las paginas van a standby (se recuperan solas al tocar cada app); no cierra nada.
+            try {
+                if (-not ('CocoTrimmer' -as [type])) {
+                    Add-Type -TypeDefinition 'using System;using System.Runtime.InteropServices;public class CocoTrimmer{[DllImport("psapi.dll")]public static extern bool EmptyWorkingSet(IntPtr hProcess);}' -ErrorAction Stop
+                }
+                $trimDeny = @('System','Idle','Secure System','Memory Compression','Registry','smss','csrss','wininit','winlogon','services','lsass','fontdrvhost','strata','strata-vision','MsMpEng','NvContainer','nvcontainer','RtkAudUService','dwm','powershell','pwsh')
+                $trimOk = 0
+                foreach ($tp in (Get-Process -ErrorAction SilentlyContinue)) {
+                    if ($trimDeny -contains $tp.ProcessName) { continue }
+                    try { if ([CocoTrimmer]::EmptyWorkingSet($tp.Handle)) { $trimOk++ } } catch {}
+                }
+                Write-Host "  Working-set trim: $trimOk procesos liberados para el budget de Strata" -ForegroundColor DarkGray
+            } catch {
+                Write-Host "  Working-set trim no disponible: $($_.Exception.Message)" -ForegroundColor DarkGray
             }
             Write-Host "[X] Servidor Strata no esta corriendo. Iniciando..." -ForegroundColor Red
             Write-Host "  Modelo: $modelLabel ($modelSize)" -ForegroundColor Gray
@@ -619,7 +653,9 @@ if ($useWTTabs) {
     $wslDir = "/mnt/$driveLetter" + ($PSScriptRoot.Substring(2) -replace '\\','/')
     Write-Host "  Lanzando Hermes gateway en pestana WSL..." -ForegroundColor DarkCyan
     $browserFlag = if ($useBrowserTool) { 'on' } else { 'off' }
-    $tailscaleFlag = if ($useOpenWebUI -or $useHermesWebUI) { 'on' } else { 'off' }
+    # 2026-10-10: Tailscale SIEMPRE on: el backend de Hermes Desktop (:9119) se usa
+    # desde el Mac en otra red via tailnet, aunque el WebUI este desactivado.
+    $tailscaleFlag = 'on'
     wt.exe -w 0 new-tab --title "Hermes Gateway (WSL)" -- wsl.exe -d Ubuntu -- bash -lc "cd '$wslDir' && USE_MODEL='$useModel' USE_BROWSER_TOOL='$browserFlag' USE_TAILSCALE='$tailscaleFlag' ./start-hermes-wsl.sh"
     Write-Host "[OK] Hermes gateway lanzado en pestana WSL" -ForegroundColor Green
 
@@ -757,6 +793,10 @@ if ($brokerScript) {
                             $env:OPENCLAW_LLAMA_CTX_SIZE = "262144"
                             $strataApiKey = Get-Content (Join-Path $env:USERPROFILE ".hermes\secrets\strata-api-key") -ErrorAction SilentlyContinue
                             if ($strataApiKey) { $env:OPENCLAW_LLAMA_API_KEY = $strataApiKey }
+                            # El broker necesita saber como relanzar Strata tras cada job GPU
+                            # (2026-10-06: antes no existia y el restart petaba con
+                            # 'llama-server executable not configured')
+                            $env:OPENCLAW_STRATA_START_SCRIPT = $strataStartScript
                             $env:OPENCLAW_LLAMA_PARALLEL = "1"
                             $env:OPENCLAW_LLAMA_N_GPU_LAYERS = "99"
                             $env:OPENCLAW_LLAMA_BATCH_SIZE = "2048"
@@ -974,6 +1014,10 @@ if ($useOpenWebUI) {
 # Warm-up
 if ($llamaNeedsWarmup) {
     if ($useModel -eq "qwen38_flashnext_nvfp4") {
+        # 2026-10-14: no esperar a Strata (si falla al arrancar, el resto ya esta lanzado)
+        Write-Host "  Strata carga en segundo plano (sin espera). Log: $strataLogFile" -ForegroundColor Gray
+    }
+    elseif ($false) {
         Write-Host "  Esperando a que Strata cargue el modelo..." -ForegroundColor Yellow
         $maxWait = 300
         $waited = 0

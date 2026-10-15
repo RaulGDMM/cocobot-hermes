@@ -159,6 +159,25 @@ kill_stale_gateway() {
   # matches the venv python running the hermes entrypoint — specific enough
   # that diagnostic commands (grep/pkill themselves) don't match it.
   pkill -f '[h]ermes-agent/venv/bin/python3.*hermes gateway' 2>/dev/null || true
+  # v0.22+: python embebido ejecutando hermes_cli/main.py directamente
+  pkill -f '[h]ermes_cli/main.py gateway run' 2>/dev/null || true
+}
+
+# Tras reiniciar WSL el PID del lock puede reutilizarlo otro proceso (p.ej. Chrome headless)
+# y Hermes lo toma por un gateway vivo que nunca responde -> exit 75 en bucle.
+# v0.22+ guarda ademas un registro de host en gateway-locks/host-gateway.json.
+clear_stale_gateway_lock() {
+  local lock_dir="${HERMES_GATEWAY_LOCK_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/hermes/gateway-locks}"
+  local lock pid cmd
+  for lock in "$HOME/.hermes/gateway.lock" "$lock_dir/host-gateway.json"; do
+    [[ -f "$lock" ]] || continue
+    pid="$(grep -oE '"pid": *[0-9]+' "$lock" | grep -oE '[0-9]+$' || true)"
+    cmd="$(tr '\0' ' ' < "/proc/${pid:-0}/cmdline" 2>/dev/null || true)"
+    if [[ -z "$pid" || "$cmd" != *hermes* || "$cmd" != *gateway* ]]; then
+      rm -f "$lock"
+      echo "[hermes] $(basename "$lock") huerfano eliminado (PID ${pid:-?} ya no es un gateway)"
+    fi
+  done
 }
 
 cleanup() {
@@ -191,8 +210,12 @@ resolve_hermes_runtime
 # Export broker URL for ComfyUI scripts (dynamic Windows host IP)
 export OPENCLAW_COMFYUI_LOCAL_BROKER_URL="http://${LLAMA_HOST}:8791"
 
-# Wait for llama-server to be ready
-wait_for_llama_server || true
+# Wait for llama-server to be ready (Strata: NO esperar; el gateway arranca aunque Strata falle)
+if (( IS_STRATA )); then
+  echo "[strata] No se espera a Strata: el gateway arranca ya (Strata carga en segundo plano)"
+else
+  wait_for_llama_server || true
+fi
 
 echo ""
 
@@ -267,6 +290,7 @@ fi
 kill_stale_gateway
 rm -f ~/.hermes/gateway.pid 2>/dev/null || true
 sleep 0.5
+clear_stale_gateway_lock
 
 echo ""
 
@@ -381,6 +405,7 @@ while true; do
   # Clean up stale PID before restarting
   kill_stale_gateway
   rm -f ~/.hermes/gateway.pid 2>/dev/null || true
+  clear_stale_gateway_lock
 
   if [[ ${exit_code} -eq 0 || ${exit_code} -eq 75 ]]; then
     sleep 2
