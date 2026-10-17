@@ -130,8 +130,10 @@ def env_bool(name: str, default: bool) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
-def request_json(method: str, url: str, payload: Any | None = None, timeout: float = 10.0) -> Any:
+def request_json(method: str, url: str, payload: Any | None = None, timeout: float = 10.0, api_key: str | None = None) -> Any:
     headers = {"Accept": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
     data = None
     if payload is not None:
         headers["Content-Type"] = "application/json"
@@ -260,6 +262,8 @@ class BrokerConfig:
     llama_predict: str
     llama_mtp_enabled: bool
     llama_mtp_draft_n_max: str
+    strata_start_script: Path | None
+    strata_api_key: str | None
     llama_mtp_draft_p_min: str
 
     @classmethod
@@ -324,6 +328,8 @@ class BrokerConfig:
             llama_mtp_enabled=env_bool("OPENCLAW_LLAMA_MTP_ENABLED", False),
             llama_mtp_draft_n_max=os.environ.get("OPENCLAW_LLAMA_MTP_DRAFT_N_MAX", "2"),
             llama_mtp_draft_p_min=os.environ.get("OPENCLAW_LLAMA_MTP_DRAFT_P_MIN", "0"),
+            strata_start_script=optional_path("OPENCLAW_STRATA_START_SCRIPT"),
+            strata_api_key=os.environ.get("OPENCLAW_LLAMA_API_KEY") or None,
         )
 
     @property
@@ -423,6 +429,144 @@ class BrokerState:
 
     def llama_is_ready(self) -> bool:
         return url_ok(f"{self.config.llama_base_url}/health", timeout=2.0)
+
+    @property
+    def _strata_mode(self) -> bool:
+        return self.config.llama_profile == "qwen38_flashnext_nvfp4"
+
+    def _strata_api_key(self) -> str | None:
+        return self.config.strata_api_key if self._strata_mode else None
+
+    def _strata_loaded(self) -> bool:
+        try:
+            h = request_json("GET", f"{self.config.llama_base_url}/health", timeout=3.0)
+            return bool(isinstance(h, dict) and h.get("loaded"))
+        except Exception:
+            return False
+
+    def _strata_process_exists(self) -> bool:
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             "Get-CimInstance Win32_Process | Where-Object { ($_.Name -in @('strata.exe','strata-vision.exe')) -or ($_.Name -in @('python.exe','pythonw.exe') -and $_.CommandLine -like '*serve.server*--engine strata*') } | Where-Object { $p = Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue; $p -and $p.Threads.Count -gt 0 } | Measure-Object | Select-Object -ExpandProperty Count"],
+            capture_output=True, text=True, creationflags=CREATE_NO_WINDOW, check=False,
+        )
+        try:
+            return int(result.stdout.strip()) > 0
+        except ValueError:
+            return False
+
+    def _stop_strata_server(self) -> None:
+        self._log("Stopping Strata server to free VRAM")
+        subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             "Get-CimInstance Win32_Process | Where-Object { ($_.Name -in @('python.exe','pythonw.exe') -and $_.CommandLine -like '*serve.server*--engine strata*' -and $_.CommandLine -like '*--port "
+             + str(self.config.llama_port)
+             + "*') -or ($_.Name -in @('strata.exe','strata-vision.exe')) } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"],
+            capture_output=True, text=True, creationflags=CREATE_NO_WINDOW, check=False,
+        )
+        deadline = time.time() + 30
+        while time.time() < deadline:
+            if not self._strata_process_exists():
+                self._log("Strata server stopped")
+                return
+            time.sleep(1)
+        raise RuntimeError("Timed out stopping Strata server")
+
+    def _start_strata_server(self) -> None:
+        script = self.config.strata_start_script
+        if not script or not script.exists():
+            raise RuntimeError("Strata start script not configured (OPENCLAW_STRATA_START_SCRIPT)")
+        # Cocobot 2026-10-12: tras ComfyUI, arrancar Strata al instante fallaba a veces
+        # (cuBLAS status 1 / relayout) y su ventana se cerraba sin cargar.
+        # Esperamos a que la GPU se vacie y reintentamos si el servidor muere.
+        self._wait_gpu_settled()
+        max_attempts = 3
+        for attempt in range(1, max_attempts + 1):
+            self._trim_working_sets()
+            self._log(f"Starting Strata server via {script} (attempt {attempt}/{max_attempts})")
+            subprocess.Popen(
+                # Cadena, no lista: con lista Python escapa las comillas y cmd no encuentra el .cmd
+                f'cmd.exe /c "{script}"',
+                cwd=str(script.parent),
+                creationflags=CREATE_NEW_CONSOLE,
+            )
+            startup_timeout = 420  # Strata pins ~44 GiB of experts: 1-3 min to load
+            self._log(f"Waiting up to {startup_timeout}s for Strata to report loaded")
+            started = time.time()
+            deadline = started + startup_timeout
+            dead_since = None
+            while time.time() < deadline:
+                if self._strata_loaded():
+                    self._log("Strata server loaded and healthy")
+                    return
+                if time.time() - started > 30:
+                    if self._strata_process_exists():
+                        dead_since = None
+                    else:
+                        dead_since = dead_since or time.time()
+                        if time.time() - dead_since > 15:
+                            self._log("Strata server window exited before loading")
+                            break
+                time.sleep(3)
+            else:
+                self._log(f"Strata did not load within {startup_timeout}s")
+            if attempt < max_attempts:
+                try:
+                    self._stop_strata_server()
+                except Exception as exc:
+                    self._log(f"Cleanup before retry failed: {exc}")
+                self._log("Cooling down 60s before retrying Strata")
+                time.sleep(60)
+                self._wait_gpu_settled()
+        raise RuntimeError(f"Strata server failed to load after {max_attempts} attempts")
+
+    def _trim_working_sets(self) -> None:
+        """Cocobot 2026-10-17: el mismo vaciado de working sets que start-hermes.ps1 antes de
+        lanzar Strata -> mas "RAM available" cuando el motor decide su budget de page-lock.
+        Las paginas van a standby (cada app las recupera sola); no cierra nada. Silencioso.
+        Via -EncodedCommand: -Command se come las comillas de DllImport en el round-trip."""
+        import base64
+        ps = (
+            "Add-Type -TypeDefinition 'using System;using System.Runtime.InteropServices;"
+            'public class CocoTrimmer{[DllImport("psapi.dll")]public static extern bool EmptyWorkingSet(IntPtr hProcess);}\' -ErrorAction Stop\n'
+            "$trimDeny = @('System','Idle','Secure System','Memory Compression','Registry','smss','csrss','wininit','winlogon','services','lsass',"
+            "'fontdrvhost','strata','strata-vision','MsMpEng','NvContainer','nvcontainer','RtkAudUService','dwm','powershell','pwsh')\n"
+            "$trimOk = 0\n"
+            "foreach ($tp in (Get-Process -ErrorAction SilentlyContinue)) {\n"
+            "    if ($trimDeny -contains $tp.ProcessName) { continue }\n"
+            "    try { if ([CocoTrimmer]::EmptyWorkingSet($tp.Handle)) { $trimOk++ } } catch {}\n"
+            "}\n"
+            "Write-Output $trimOk"
+        )
+        enc = base64.b64encode(ps.encode("utf-16-le")).decode()
+        try:
+            r = subprocess.run(
+                ["powershell", "-NoProfile", "-EncodedCommand", enc],
+                capture_output=True, creationflags=CREATE_NO_WINDOW, check=False, timeout=120,
+            )
+            n = r.stdout.decode("ascii", "ignore").strip() or "?"
+            self._log(f"Working-set trim before Strata: {n} processes trimmed" if r.returncode == 0 else f"Working-set trim rc={r.returncode} (ignored)")
+        except Exception as e:
+            self._log(f"Working-set trim failed (ignored): {e}")
+
+    def _wait_gpu_settled(self, max_wait: float = 90.0, threshold_mib: int = 3500) -> None:
+        """Espera a que la VRAM usada baje (ComfyUI liberado) y deja 10 s extra de margen."""
+        deadline = time.time() + max_wait
+        used = None
+        while time.time() < deadline:
+            try:
+                out = subprocess.run(
+                    ["nvidia-smi", "--query-gpu=memory.used", "--format=csv,noheader,nounits"],
+                    capture_output=True, text=True, creationflags=CREATE_NO_WINDOW, check=False, timeout=10,
+                ).stdout.strip().splitlines()
+                used = int(out[0]) if out else None
+            except Exception:
+                used = None
+            if used is not None and used < threshold_mib:
+                break
+            time.sleep(2)
+        self._log(f"GPU settled (VRAM used: {used} MiB); waiting 10s before starting Strata")
+        time.sleep(10)
 
     def _llama_slot_alias(self) -> str | None:
         if not self.config.llama_model:
@@ -674,6 +818,9 @@ class BrokerState:
             "--disable-auto-launch",
             "--reserve-vram", "2.0",
             "--disable-smart-memory",
+            # Aceleracion VAE H3 (encoder/decoder fp16_accumulation, ComfyUI >=0.36).
+            # Anadido 2026-10-06 para el A/B del VAE int8; ver minimax-h3-guide.md.
+            "--fast", "fp16_accumulation",
         ]
 
         if self.config.comfy_extra_model_paths_config and self.config.comfy_extra_model_paths_config.exists():
@@ -795,6 +942,9 @@ class BrokerState:
         return "llama-server.exe" in result.stdout
 
     def _stop_llama_server(self) -> None:
+        if self._strata_mode:
+            self._stop_strata_server()
+            return
         if self.llama_is_ready():
             self._log("Saving llama KV cache slots before shutdown")
             self._save_llama_slots()
@@ -817,6 +967,9 @@ class BrokerState:
 
     def _start_llama_server(self) -> None:
         if self.config.use_backend != "llama-server":
+            return
+        if self._strata_mode:
+            self._start_strata_server()
             return
         if not self.config.llama_server_exe or not self.config.llama_server_exe.exists():
             raise RuntimeError("llama-server executable not configured")
@@ -984,7 +1137,8 @@ class BrokerState:
 
     def _warmup_llama_server(self) -> None:
         try:
-            models = request_json("GET", f"{self.config.llama_base_url}/v1/models", timeout=10)
+            api_key = self._strata_api_key()
+            models = request_json("GET", f"{self.config.llama_base_url}/v1/models", timeout=10, api_key=api_key)
             data = models.get("data", [])
             model_id = None
             for entry in data:
@@ -1003,7 +1157,7 @@ class BrokerState:
                 "temperature": 0,
                 "stream": False,
             }
-            request_json("POST", f"{self.config.llama_base_url}/v1/chat/completions", payload=body, timeout=300)
+            request_json("POST", f"{self.config.llama_base_url}/v1/chat/completions", payload=body, timeout=300, api_key=api_key)
             self._log(f"llama-server warmup completed with model {model_id}")
         except Exception:
             return

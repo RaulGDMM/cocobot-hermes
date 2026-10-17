@@ -261,7 +261,7 @@ if ($useModel -eq "qwen38_27b_unsloth_q6k_mtp") {
     # greedy si la peticion no manda temperatura (Hermes no la manda) -> bucles en razonamientos
     # largos. Valores recomendados por Qwen para thinking. Se aplican a cocobot.json en cada
     # arranque, asi tambien los usa el broker cuando relanza Strata.
-    $strataSampling = [ordered]@{ temperature = 0.6; top_p = 0.95; top_k = 20 }
+    $strataSampling = [ordered]@{ temperature = 1.0; top_p = 0.95; top_k = 20 }
     if (Test-Path $strataConfig) {
         $cfgJson = Get-Content $strataConfig -Raw | ConvertFrom-Json
         $cur = $cfgJson.sampling
@@ -269,7 +269,7 @@ if ($useModel -eq "qwen38_27b_unsloth_q6k_mtp") {
         if (-not $same) {
             $cfgJson | Add-Member -NotePropertyName sampling -NotePropertyValue ([pscustomobject]$strataSampling) -Force
             $cfgJson | ConvertTo-Json -Depth 10 | Set-Content $strataConfig -Encoding UTF8
-            Write-Host "  Strata sampling por defecto -> temp 0.6, top_p 0.95, top_k 20" -ForegroundColor DarkCyan
+            Write-Host "  Strata sampling por defecto -> temp 1.0, top_p 0.95, top_k 20" -ForegroundColor DarkCyan
         }
     }
 } else {
