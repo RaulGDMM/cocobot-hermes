@@ -29,6 +29,7 @@ progreso por paso y por ítem (plano FG / chunk HDR); relanzar reanuda.
 | `pvsg30_pipeline_v2.py` | Plantilla A/B de 30 s (misma receta, trozo pequeño) — útil para re-validar la cadena tras actualizar nodos. |
 | `ssim_cuts_pvsg30.py` | Calibración de cortes por dip de SSIM a 32×32 (el detector interno del FG NO es fiable en cortes duros: produce frames "derretidos" atravesándolos). |
 | `hdr1500_run.py` | Variante de mastering HDR a 1500 nits (vs 1000), la aprobada. |
+| `yt_hdr10_upload.sh` | **Entrega para YouTube**: re-encode HEVC main10 con metadata de mastering HDR10 (ST 2086) + MaxCLL, y verificación. Uso: `yt_hdr10_upload.sh master.mp4 salida.mp4 [nits=1500]`. |
 
 ## Requisitos
 
@@ -66,6 +67,26 @@ progreso por paso y por ítem (plano FG / chunk HDR); relanzar reanuda.
   (B-frames): ORDENA los pts antes de comprobar que todos los deltas valen 1/60.
 - **24→60 directo**: es el caso nativo de DLSSG (cascade+decimación); un
   24→120→60 daría la misma rejilla a ~2.7× el coste.
+- **Entregar a YouTube en HDR da un paso extra**: las etiquetas de color
+  (bt2020/smpte2084) en un H.264 NO bastan — YouTube clasifica HDR mirando el
+  metadata de mastering **SMPTE ST 2086 (MDCV) + MaxCLL**, y prefiere HEVC/VP9.
+  Sin ello sube el vídeo como SDR y su tone-map genérico "lava" los colores.
+  El envase es `yt_hdr10_upload.sh` (HEVC main10 hvc1 + SEI ST2086/CLL, al
+  estilo de las cámaras). Trampa de sintaxis: en x265 `max-cll` lleva COMA
+  (`max-cll=1500,0`); con `:` se descarta dejando solo un warning. Tras subir,
+  la insignia HDR aparece solo cuando YouTube termina la variante VP9/AV1 HDR
+  (20 min–2 h).
+
+## Entrega a YouTube (HDR10)
+
+```bash
+./yt_hdr10_upload.sh "montaje/Perros vs Gatos.mp4" "montaje/Perros vs Gatos_HDR10.mp4" 1500
+```
+
+El script re-utiliza el máster del paso 6 tal cual (no re-mira el grano: el
+encode es CRF 18, visualmente lossless a 4K y YouTube re-codifica igualmente),
+incrusta el mastering display de nuestros 1500 nits y **verifica** que el
+`side data` del resultado trae MDCV y MaxCLL antes de dar el OK.
 
 ## Ritmos medidos (RTX 5090, máster 274 s)
 
