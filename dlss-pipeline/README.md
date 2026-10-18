@@ -72,10 +72,13 @@ progreso por paso y por ítem (plano FG / chunk HDR); relanzar reanuda.
   metadata de mastering **SMPTE ST 2086 (MDCV) + MaxCLL**, y prefiere HEVC/VP9.
   Sin ello sube el vídeo como SDR y su tone-map genérico "lava" los colores.
   El envase es `yt_hdr10_upload.sh` (HEVC main10 hvc1 + SEI ST2086/CLL, al
-  estilo de las cámaras). Trampa de sintaxis: en x265 `max-cll` lleva COMA
-  (`max-cll=1500,0`); con `:` se descarta dejando solo un warning. Tras subir,
-  la insignia HDR aparece solo cuando YouTube termina la variante VP9/AV1 HDR
-  (20 min–2 h).
+  estilo de las cámaras). Dos trampas de sintaxis x265, ambas silenciosas:
+  `max-cll` lleva COMA (`max-cll=1500,0`, con `:` se descarta), y las
+  coordenadas van escaladas **x50000** (no x100000: al doble se aceptan y
+  salen primarios erróneos). Ojo al verificar: ffprobe NO expone el SEI HDR de
+  HEVC como side data — el script comprueba los SEI binarios y sus valores.
+  Tras subir, la insignia HDR aparece solo cuando YouTube termina la
+  variante VP9/AV1 HDR (20 min–2 h).
 
 ## Entrega a YouTube (HDR10)
 
