@@ -104,7 +104,12 @@ with open(path, encoding="utf-8") as f:
     lines = f.read().split("\n")
 out, in_cp, cp_idx, has_strata = [], False, None, False
 for line in lines:
-    if re.match(r"^\S", line):
+    # Top-level keys start with a letter/underscore at column 0. Entries of a
+    # column-0 sequence ("- api_key: ...") also start at column 0 but begin
+    # with '-', so they must NOT close the block — otherwise the scan exits
+    # custom_providers early, misses "name: strata", and re-inserts a
+    # duplicate indented block every boot (2026-10-26 YAML corruption).
+    if re.match(r"^[A-Za-z_]", line):
         in_cp = line.startswith("custom_providers:")
         if in_cp:
             cp_idx = len(out)
@@ -119,15 +124,31 @@ for line in lines:
         line = re.sub(r"(base_url: http://[^/:\s]+):8097/v1", r"\1:30000/v1", line)
     out.append(line)
 if not has_strata and cp_idx is not None:
-    out[cp_idx + 1:cp_idx + 1] = [
-        "  - api_key: ''",
-        "    api_mode: chat_completions",
-        f"    base_url: http://{host}:8097/v1",
-        "    key_env: STRATA_API_KEY",
-        "    models:",
-        "      - qwen3.8-flash-next-nvfp4",
-        "    name: strata",
-    ]
+    # Insert using the SAME sequence style the block already uses: mixing a
+    # column-0 "-" entry into a 2-space-indented block (or vice versa) is a
+    # YAML parse error and was silently corrupting config.yaml every boot.
+    nxt = out[cp_idx + 1] if cp_idx + 1 < len(out) else ""
+    if nxt.startswith("-"):
+        block = [
+            "- api_key: ''",
+            "  api_mode: chat_completions",
+            f"  base_url: http://{host}:8097/v1",
+            "  key_env: STRATA_API_KEY",
+            "  models:",
+            "  - qwen3.8-flash-next-nvfp4",
+            "  name: strata",
+        ]
+    else:
+        block = [
+            "  - api_key: ''",
+            "    api_mode: chat_completions",
+            f"    base_url: http://{host}:8097/v1",
+            "    key_env: STRATA_API_KEY",
+            "    models:",
+            "      - qwen3.8-flash-next-nvfp4",
+            "    name: strata",
+        ]
+    out[cp_idx + 1:cp_idx + 1] = block
 with open(path, "w", encoding="utf-8") as f:
     f.write("\n".join(out))
 print(f"[config] backend LLM -> custom:{'strata' if to_strata else 'llama-server'}")
