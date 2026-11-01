@@ -18,7 +18,7 @@
     {
       "capability": "Fast, iterable music generation (with editing and LoRA)",
       "model": "ACE Step 1.5 XL Turbo (decoder 4B + text encoder 4B, 8 steps CFG 1.0; variantes xl-merge SFT, 2B high, AIO standard)",
-      "role": "music",
+      "role": "recommended",
       "vram_gb": null,
       "disk_gb": null,
       "time_measured": "~6 s per song with turbo (RTX 5090, comparison in the minimax-music3 skill); disk per model: not measured",
