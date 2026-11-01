@@ -34,7 +34,13 @@ Verificado: sin marcadores personales y todos los .py espejados compilan.
 Pendientes de decisión de Raúl: `cocobot-voice-ref.wav` (ya público en el repo) y autoría/licencia de
 `hyperframes*`/`media-use` (copiadas de `~/.claude/skills`, sin LICENSE visible).
 
-### P1 — Catálogo como dato único (`catalog.json`)
+### P1 — Catálogo como dato único ✅ (2026-11-01)
+38 entradas × 3 secciones (`catalog-parts/{image,video,audio-llm}[-en].json`), extraídas de las skills por fan-out y traducidas EN. Campos nulos = «sin medición» (nunca inventado).
+
+### P2 — Web ✅ DESPLEGADA (2026-11-01)
+`cocobot-pages/pages/local-ai-studio/` → https://raulgdmm.github.io/cocobot-pages/pages/local-ai-studio/ (ES) y `index-en.html` (EN). `build_site.py` regenera ES/EN desde catalog-parts (fuente única). QA: verificación estructural + móvil 390 sin desborde + escaparate YouTube embebido. Tarjeta añadida al índice.
+
+### ~~P1 borrador original~~ (contenido arriba)
 Esquema por capacidad: `{id, name_es/en, models:[{nombre, rol(recomendado/alternativa), vram_gb,
 disco_gb, tiempo_medido, licencias, cuando_no_usarlo, workflow_ref, verified_date}]}`.
 Semilla desde skills `comfyui-local`, `ai-video-studio`, `dlss-comfyui-video`, `video-4k-upscale`,
