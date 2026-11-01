@@ -60,3 +60,8 @@ PR-*-informe-ejecucion-pruebas.md
 hyperframes-promo/.thumbnails/
 hyperframes-promo/.waveform-cache/
 hyperframes-promo/frame_preview.jpg
+# Generated audio (skills)
+*.mp3
+*.wav
+!scripts/assets/*.wav
+!skills/**/scripts/assets/*.wav

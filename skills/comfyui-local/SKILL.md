@@ -1,6 +1,6 @@
 ---
 name: comfyui-local
-description: Generate images and videos locally through the Windows ComfyUI broker using FLUX, LTX 2.3, LTX 2.5, and MiniMax H3.
+description: Generate images and videos locally through the Windows ComfyUI broker using FLUX, LTX 2.3, LTX 2.5, MiniMax H3, MOSS-Image.
 metadata:
   {
     "openclaw":
@@ -32,9 +32,12 @@ Use `--model` to choose the image generation model. **Default is `z-image-turbo`
 
 | Model | Flag | Role |
 |-------|------|------|
-| Z-Image-Turbo | `--model z-image-turbo` | **DEFAULT.** Fast + renders text well in most cases. |
+| FLUX 3 Image Klein | `--model flux3-klein` / `flux3-klein-base` | Fast all-rounder + editing (installed 2026-10-25): distilled 16 steps ~6-8s/1MP (fastest quality arm), text ES perfect, clean product shots; skin realism below MOSS (use base+upsampler for faces). Editing wired and A/B-validated (2026-10-25 round 2): ties Qwen on identity swaps at ~4-8x the speed, BEATS Qwen on 2-ref position adherence; not pixel-preserving when the prompt contradicts the photo. Comm. OK <5M€ revenue. |
+| MOSS-Image SFT | `--model moss-image` | **Photorealism specialist** (installed 2026-10-25): best skin realism (won the portrait A/B vs Qwen 2.1), documentary scenes, ES text (tie with Qwen, perfect Ñ). t2i ONLY (script rejects `--image`). Apache-2.0 → commercial-safe (unlike Qwen 2.1 / Ideogram 4). |
+| Qwen-Image 2.1 | `--model qwen-image-2.1` | **DEFAULT** (since 2026-09-21, after the hard-prompt A/B battery): best overall t2i, the ONLY multi-reference editor (up to 16 refs, identity-preserving), native RGBA/transparent output. Qwen Research License: **non-commercial only** (same as Ideogram 4). |
+| Z-Image-Turbo | `--model z-image-turbo` | Fast + renders text well in most cases. Best legibility (bold high-contrast text) and speed; no editing. |
 | Ideogram 4.0 | `--model ideogram4` | Use when **exact text matters** (posters, banners, infographics). 0 text errors in A/B; most reliable for Spanish text with accents. Slower (~4x) and heavier (~29GB). Auto-runs the magic prompt through the local LLM. |
-| FLUX.2 Klein 9B | `--model flux2-klein-9b` | **For image editing** (`--image`). Make exact-text work: in A/B it mangled "DEL"→"DE" and "ESPECIALIDAD"→"ESPECIALDAD". |
+| FLUX.2 Klein 9B | `--model flux2-klein-9b` | **For image editing** (`--image`) when Qwen's edit is not enough; best anatomy/instrument detail (won the cello test). Make exact-text work: in A/B it mangled "DEL"→"DE" and "ESPECIALIDAD"→"ESPECIALDAD". |
 | FLUX.1 Dev | `--model flux1-dev` | Character consistency / i2i via Kontext. |
 
 | Model | Flag | Quality | Speed (RTX 5090) | VRAM | Text | Best for |
@@ -43,6 +46,63 @@ Use `--model` to choose the image generation model. **Default is `z-image-turbo`
 | FLUX.2 Klein 9B | `--model flux2-klein-9b` | Higher | ~3-5s | ~12GB | Excellent | Speed, text rendering, landscapes and iteration |
 | Z-Image-Turbo | `--model z-image-turbo` | High | ~1-2s | ~10GB | Excellent, including Spanish | Ultra-fast generation, portraits, HDR-like lighting and text |
 | Ideogram 4.0 | `--model ideogram4` | State-of-the-art (AA #1 open-weights) | ~70s end-to-end (incl. model load) | ~29GB (dual DiT fp8 + Qwen3-VL-8B encoder) | **Best-in-class**, incl. Spanish, with exact layout control | Posters, banners, covers, infographics, any image with in-frame text; 2K native; hex color palettes |
+| Qwen-Image 2.1 | `--model qwen-image-2.1` | High (2K native; **A/B winner overall 2026-09-21**) | ~40-60s at 720p+ int8 | ~17.5GB (DiT int8 + Qwen3VL-8B encoder int8 + VAE) | Best overall: 2K quality, multi-reference editing (16 refs, no identity crossing), transparent/RGBA assets, concept/double-exposure, local mask edits | **DEFAULT**: general generation, editing, product cutouts |
+
+### Qwen-Image 2.1 (7B, 2026-09-20)
+
+**Prompting:** before writing any Qwen 2.1 prompt (text-to-image, text in image, editing, multi-ref, RGBA), read [`references/qwen-image-2-1-prompt-guide.md`](references/qwen-image-2-1-prompt-guide.md) — 5-slot structure, quoted+placed text strings, RGBA prompt format, multi-ref define-each-reference pattern, ready templates.
+
+Unified t2i + image editing in one checkpoint, 2K native, **native RGBA/transparent** output, up to 16 reference images, local-region edits (masks). Weights on `F:\ComfyUIModels` (Comfy-Org packaging): `diffusion_models/qwen_image_2.1_int8_convrot.safetensors` (7.3GB), `text_encoders/qwen3vl_8b_int8_convrot.safetensors` (9.4GB), `vae/qwen_image_2.1_vae_bf16.safetensors`.
+
+Pitfalls (learned 2026-09-20 during first setup):
+- **The encoder is `qwen3vl_8b_int8_convrot.safetensors`** (Qwen3VL-8B, CLIPLoader `type: "qwen_image"`). The repo's `qwen3.5_9b_qwen_image_2.1_pe_{t2i,i2i}.int8_convrot` files are prompt-enhancer variants, NOT the generator's encoder — do not download/use them for generation. Also NOT compatible with Ideogram 4's `qwen3vl_8b_fp8_scaled` (different weight-key prefixes).
+- **`TextEncodeQwenImage21` requires `resolution` in the API workflow** even though the UI has a default — API validation fails with "Required input is missing: resolution" otherwise. In t2i mode (no `image_N` refs) the value only sizes the unused square latent the node returns; the KSampler uses EmptyLatentImage.
+- Edit/multi-ref mode: reference images plug into `TextEncodeQwenImage21` as autogrow inputs `image_1`…`image_16`, and the node also outputs a latent at the first ref's size (use it, not EmptyLatentImage).
+- **License: Qwen Research License — non-commercial only** (same restriction as Ideogram 4). Personal use OK; commercial needs a separate license.
+- VRAM: int8 config ≈ 17.5GB weights, bf16 DiT config ≈ 23.1GB weights — both fit the 5090 with room to spare. bf16 encoder (17.5GB) does NOT fit with the DiT. **Measured (2026-09-20): sampling is ~18s for 1024²/20 steps in BOTH int8 and bf16** (RTX 5090 bandwidth makes int8 no faster); the ~55-58s wall time per image is mostly model load + broker overhead, not sampling.
+- **A/B int8 vs bf16 (same seed/prompt, DiT only differs): BF16 IS THE DEFAULT and wins side-by-side.** The 2026-09-20 "pixel diff mean 1.2/255, imperceptible" verdict was WRONG — the mean metric hides what humans actually see: in a same-seed side-by-side (2026-09-21, serenoide test) bf16 has visibly finer bioluminescent veins, cleaner skin (int8 shows subtle grain in glow zones), sharper hands/fin and tighter glow. Lesson: for perceptual A/B of quantizations, judge side-by-side with vision, never mean-pixel-diff alone. Speed on the 5090: sampling equally fast (bandwidth-bound); bf16 batch costs ~19s extra per batch for the 14.2GB model load vs 7.3GB int8 — negligible in multi-image batches. **Int8 weights DELETED 2026-09-21** and the `--qwen21-dit` flag REMOVED from `generate_image.py` (the script hardcodes `qwen_image_2.1_bf16.safetensors` — do not pass the flag, it no longer exists). Re-add the flag + map + download int8 weights only if a future A/B ever justifies it.
+- Sampling: euler / simple / cfg=1.0 per the official Comfy-Org t2i template (`image_qwen_image_2_1_t2i.json`); default 25 steps in the template, 20 works fine.
+
+A/B 2026-09-20 (same prompts/seeds as the 2026-09-19 `ab_ig4` battery, `imagenes/ab_q21/`): poster ES 0 errors, apple 9/10 photoreal, banner ES 0 errors (tildes + "ESPECIALIDAD" correct, where FLUX.2 Klein had mangled it).
+
+**Hard-prompt A/B 2026-09-21** (18 generations, 4 models, same prompt+seed per test, `imagenes/ab_q21/hard/`):
+- **P1 long Spanish text (poster "FERIA DEL LIBRO" + ñ):** all four spelled everything correctly (incl. ñ, dates); Z-Image best *legibility* (uniform bold), Qwen most *editorial*, FLUX worst (grunge texture mutes the small line). No text inversions anywhere.
+- **P2 hands + small text:** IDEOGRAM won (most realistic hands); Qwen correct on all three criteria (3rd); FLUX had one "glove" hand.
+- **P3 5 objects + 5 price tags "3,50 €"…:** Qwen 5/5 objects + 5/5 tags *correctly mapped*; **IDEOGRAM got "Image blocked by safety filter" twice (P3, P4)** — even with magic-prompt JSON it false-positives on benign prompts; Z-Image swapped a price and dropped one tag. FLUX also 5/5 but bigger/sharper (narrow win on fidelity).
+- **P4 concept double-exposure (fox+forest):** **QWEN WON** — the only model that actually fused the silhouette with the forest (FLUX partial, Z-Image "two things pasted", Ideogram blocked).
+- **P5 2K cello portrait:** FLUX.2 KLEIN won clearly (correct cello anatomy + both hands; Qwen failed the instrument — volute glued to the head, missing left hand).
+- **Edit/multi-ref (Qwen-only, no competitor):** identity background swap 8.5/10 (recognizable same person); **2 distinct people in one scene: 8/10, zero identity crossing** (balding vs beard+glasses stayed on the right man); cat re-composed to sunny windowsill 8/10 with clean scene removal + rim-light/shadow integration; **RGBA cutout: real alpha (21.9% fully transparent), clean edge, semi-transparent contact shadow inside the alpha channel** — no other installed model can do this.
+- **Verdict → Qwen-Image 2.1 is the DEFAULT** for both t2i and editing (set 2026-09-21): only multi-ref editor + only RGBA model + wins concept + text tie. Keep Ideogram 4 for layout-heavy text (but beware its safety filter), FLUX.2 Klein for musical instruments/fine anatomy, Z-Image for speed.
+
+**Prompt enhancer (since 2026-09-22):** `--prompt-enhance` is an OPT-IN flag for `--model qwen-image-2.1` (t2i AND edit). It expands the user's short brief (any language) into a detailed 5-slot layout brief via the local llama-server (same mechanism as Ideogram 4's magic prompt), using the system prompt `scripts/qwen_image_2.1_enhance_v1.txt` (5-slot order, verbatim quoted text with original language/accents, RGBA rules, multi-ref Figure-N pattern). Fails open to the raw prompt if the LLM is down. Verified 2026-09-22 on 3 briefs (poster ES, RGBA sticker, edit): correct structure, Spanish text preserved verbatim with quotes, RGBA prefix/suffix exact, edit prompt defines Figure 1 + preservation + do-not list. Rule of thumb: use it for SHORT briefs; skip it when the prompt already follows the 5-slot guide (re-expanding an already-structured prompt wastes tokens and can add invented detail). To iterate on the enhancer, edit `qwen_image_2.1_enhance_v1.txt` only — do not touch the script's plumbing.
+
+**Negative prompt A/B recipe (NOT default):** our Qwen 2.1 workflow is pinned to the official Comfy-Org template (cfg=1.0), so any negative prompt is INERT as wired — the negative branch only computes when cfg>1. Do not change the default. If a specific failure mode appears (deformed hands, blurry text, oversaturation), run a controlled A/B: same prompt+seed, one image at cfg=1.0 (baseline) vs one at `--guidance 2.0` with a negative targeting ONLY the failure mode ("deformed hands, blurry text"), judge side-by-side. If the CFG>1 win is clear for that task class, note it here with the tested value; never raise the global default without a validated A/B.
+
+**Multi-ref wiring pitfall (2026-09-21):** the reference images of `TextEncodeQwenImage21` are an `Autogrow` input with id `images` (TemplateNames `image_1`…`image_16`). In the **API workflow they must be TOP-LEVEL dotted keys** `"images.image_N": [loadNodeId, 0]` — NOT top-level `"image_N"` (the validator auto-expands the schema and passes validation, but `execute()` then dies with `unexpected keyword argument 'image_1'`) and NOT a nested `"images": {}` dict (Python workflow JSON can't express it). The runtime re-groups the dotted keys into the `images` dict via `dynamic_paths` before `execute()`.
+
+### FLUX 3 Image Klein (BFL, 5.6B, 2026-10-15)
+
+**Weights** (FLUX Kommunity License; HF repo `black-forest-labs/flux-3-image-klein-comfy` is GATED — agree on web as the token user, or download from the ungated mirror `ml-resources/flux-3-image-klein-comfy`, same files). Installed in `F:\ComfyUIModels`: `flux3-image-klein-bf16.safetensors` + `flux3-image-klein-base-bf16.safetensors` (distilled + base, 11 GB each), `qwen3vl_4b_bf16.safetensors` (CLIPLoader `type: "flux3"`), VAE = existing `flux2-vae.safetensors`.
+
+**Recipe (from official BFL workflow JSONs, mirrored in generate_image.py):** UNETLoader + CLIPLoader(flux3) + **ModelSamplingFlux(max_shift=base_shift=2.77259, width, height)** + EmptyFlux2LatentImage + KSampler euler/simple. Distilled: 16 steps CFG 1.0; base: 50 steps CFG 4.0. Prompt upsampler (qwen3.5_9b_flux3_prompt_upsampler_w4a8, NOT installed) is part of the UI template and BFL says don't skip it — wired as opt-in `--upsample` (t2i only): CLIPLoader(type flux3) `qwen3.5_9b_flux3_prompt_upsampler_int8_convrot.safetensors` (9.75 GB, F:) -> `TextGenerate` (template sampling: temp 1, top_k 1, top_p 0.95, presence 1.5, max 3584, mtp off; DynamicCombo sub-inputs as dotted `sampling_mode.*`; system prompt = official BFL caption prompt in `scripts/flux3_upsampler_system.txt`, user msg `ORIGINAL PROMPT:\n<prompt>`) -> CLIPTextEncode text. The script refuses to send if `--upsample` is set but no TextGenerate is in the graph (guard added after a silent no-op bug: the param was never forwarded from main(), so the first ON battery was pixel-identical to OFF, mean|diff| 0.0 — ALWAYS check `'811' in png.info['prompt']` or a pixel diff before judging an A/B). Editing IS wired (`--image`/`--image2` + `--model flux3-klein[-base]`, verified 2026-10-25): LoadImage→ImageScaleToTotalPixels(1 MP)→`ReferenceMultiLatent`→KSampler, **guidance 1.0 on BOTH checkpoints in edit mode** (template; the t2i defaults are wrong for edits). v3-node API pitfalls that cost 3 debug cycles: DynamicCombo goes as `"resolution": "resize"` + DOTTED `"resolution.megapixels": 1.0` (flat or nested keys fail: "Required input is missing: resolution.megapixels"), refs go as dotted `"images.imageN"` (Autogrow), and `ImageScaleToTotalPixels` param is `resolution_steps` (NOT `resolution_round`).
+
+**A/B 3-way vs Qwen-2.1 + MOSS (2026-10-25, seed 20261025, raw prompts, `imagenes/ab_flux3/cmp3_*`):** no model swept. Skin portrait: MOSS 1st, Klein 2nd (distilled over-sharpened pores; base visibly more photographic), Qwen 3rd. Product: Qwen 1st (brief adherence), Klein 2nd (text perfect, NO gibberish micro-text — beat MOSS there). ES poster: three-way tie, all 3 texts perfect incl. Ñ. Hands simple grip: all pass. Tea-stall documentary: Klein≈MOSS 1st, Qwen 3rd. Matches AA Elo (Klein 1043 ≈ Qwen 1042 t2i). Community lore held: anatomy-scare is mostly complex poses; editing is Klein's real pitch (pixel-exact preservation). **Round 2 DONE (2026-10-25, `imagenes/ab_flux3/edit/cmp_e*`, same seed 20261025 vs Qwen 2.1):** identity background-swap = TIE at parity with Qwen's 2026-10-16 8.5 (both preserved face/hair/shirt pattern; Klein in 16 steps ~4-8x faster). Two-people pub scene = **Klein WON**: honored left/right placement of the two refs and rendered believable hands on the table, while Qwen swapped who sits where. Preservation test (toast→pancakes, intentionally lying prompt: "same wooden table" on a white-speckled surface): NEITHER model is truly pixel-preserving — both invented the wooden table the text asked for; Qwen kept the top-down angle, Klein made the more appetizing edit. Rule: Klein = co-default for editing with Qwen (speed + multi-ref position adherence); Qwen keeps RGBA and product-brief edits; prompt text beats pixels in both, so never contradict the source photo in edit prompts. **
+
+**Upsampler ON vs OFF (2026-10-25, same seed/prompts, `imagenes/ab_flux3/cmp_up_*`):** ON wins 4 clear + 1 narrow on DETAILED briefs because raw Klein drifts from the brief and the upsampler pins it: portrait (natural skin irregularities, real harbour context vs OFF's over-carved uniform spots), product (OFF wandered to a lifestyle kitchen, ON = clean studio as asked), full-body hands (OFF cropped to waist-up ignoring 'full-body'), tea stall (ON actually pours from height into a kulhad, rickshaw/rain; but invents a garbled newspaper), ES poster (text 3/3 perfect BOTH, ON narrow win on layout). BUT on a SHORT vague prompt ('A red fox in fresh snow at sunrise') OFF won clearly: ON built a richer landscape but stilt legs, weird smile, cut-out lighting. Rule: use `--upsample` for full briefs with constraints (studio bg, framing, actions); skip it for short mood prompts and when exact text legibility matters more than layout. Upsampler can invent pseudo-text props (newspapers/signs).
+
+### MOSS-Image SFT (OpenMOSS, 2026-10-25)
+
+**Requirements:** ComfyUI ≥ 0.42 (native support: `CLIPLoader type: "moss_image"`, Flux2 latent format — `EmptyFlux2LatentImage`). Weights in `F:\ComfyUIModels`: `diffusion_models/moss_image_sft_bf16.safetensors` (10.2 GB, Kijai int8 also available), `text_encoders/qwen3.5_9b_int8_convrot.safetensors` (9.75 GB; bf16 19.3 GB does NOT fit alongside the bf16 DiT), VAE = existing `flux2-vae.safetensors`. No custom nodes needed for t2i. ~20 GB total weights, fits the 5090.
+
+**Recipe (validated):** er_sde / simple / 30 steps / CFG 2.5, negative `plastic skin, waxy skin` (inert at cfg≤1). Script defaults: steps 30, guidance 2.5; pass `--moss-negative`. Base model exists for LoRA training; CharRef/pose LoRAs + edit node (`ComfyUI-MOSS-Image-Ostris-Edit`) NOT installed.
+
+**A/B vs Qwen-Image 2.1 (2026-10-25, seed 20261025, `imagenes/ab_moss/`, 5 tests):** MOSS 2 – Qwen 1 – 2 ties. MOSS WON skin realism (sun spots, pores, knit texture vs Qwen's too-clean skin) and documentary scene obedience (chai stream into the requested cup); TIED on ES poster text (both perfect incl. ñ) and simple hands (MOSS did full-body with correct fingers); LOST product brief (wandered to lifestyle scene + invented gibberish micro-text under the correct brand label). Verdict: opt-in specialist for photoreal portraits/documentary + commercial-safe (Apache-2.0); Qwen 2.1 remains DEFAULT (editing, RGBA, brief adherence).
+
+### FLUX 3 Image Klein (BFL 5.6B, installed 2026-10-25)
+
+Flags: `--model flux3-klein` (distilled, default 16 steps cfg 1) and `--model flux3-klein-base` (50 steps cfg 4, also the LoRA-training variant). Wiring mirrors the official BFL ComfyUI workflows (UNETLoader + CLIPLoader type `flux3` Qwen3VL-4B + ModelSamplingFlux max_shift=base_shift=2.77259 + EmptyFlux2Latent + euler/simple); the Qwen3.5-9B prompt upsampler is intentionally OFF for raw-prompt A/B fairness. Editing (Set Reference Multi Latent, `<ref_image_N>`, up to 10 refs) NOT wired yet — script rejects `--image`. Edit-prompt rule when wired: describe the FINAL frame, not the change. Community caveats: BFL says Klein was trained with long LLM-written captions (raw short prompts weaker); anatomy (hands/eyes) is its reported weakness.
+
+Weights in `F:\ComfyUIModels`: `diffusion_models/flux3-image-klein-bf16.safetensors`, `flux3-image-klein-base-bf16.safetensors`, `text_encoders/qwen3vl_4b_bf16.safetensors`; VAE = existing `flux2-vae.safetensors`. **HF gotcha:** `black-forest-labs/flux-3-image-klein-comfy` is gated (Kommunity License) — 403 even with a valid token until accepted in the web UI; the **`ml-resources/flux-3-image-klein-comfy`** mirror is ungated with byte-identical sizes, and hosts the official `workflows/*.json` (t2i/i2i/mi2i reference wiring; UI-format, core nodes live under `definitions.subgraphs`). License: FLUX Kommunity (commercial OK <5M USD/yr). A/B vs Qwen-Image 2.1 + MOSS (seed 20261025, `imagenes/ab_flux3/run_battery_klein.py`): pending verdict.
 
 ### Ideogram 4.0
 
@@ -65,6 +125,19 @@ Ideogram 4 (9.3B single-stream DiT, trained from scratch, June 2026) is the #1 o
 | `qwen3vl_8b_fp8_scaled.safetensors` | `text_encoders/` | 10.6 GB |
 | `flux2-vae.safetensors` | `vae/` (shared with FLUX.2) | 321 MB |
 
+### MOSS-Image (OpenMOSS SFT, Apache-2.0, installed 2026-10-25)
+
+`--model moss-image` — text-to-image only (the script rejects `--image`: MOSS has no image input without the experimental edit node/LoRA). Script defaults follow the official recipe: `er_sde` / `simple` / 30 steps / CFG 2.5; pass `--moss-negative "plastic skin, waxy skin"` for realistic skin. `--dit` also swaps the MOSS DiT (Base is the LoRA-training variant).
+
+Native support in ComfyUI ≥0.42 (verify via `comfyui_version.py` of the live install): UNETLoader + CLIPLoader `type: "moss_image"` + `EmptyFlux2LatentImage` + FLUX.2 VAE (shared `flux2-vae.safetensors` — already installed, zero VAE download). No custom node needed for t2i.
+
+Weights on `F:\ComfyUIModels`: `diffusion_models/moss_image_sft_bf16.safetensors` (10.2GB) + `text_encoders/qwen3.5_9b_int8_convrot.safetensors` (9.75GB) ≈ 20GB, fits the 5090 with headroom (same bf16-DiT + int8-encoder pattern as Qwen 2.1 — the bf16 19.3GB encoder does not fit alongside the DiT). int8 DiT (5.4GB) and w4a8 encoder (7.3GB) variants exist in `Comfy-Org/MOSS-Image` if VRAM ever tightens; the 4-step model/LoRA (`akhaliq/MOSS-Image-SFT-4-steps`, CFG 1 + 4 steps) is NOT installed.
+
+**License: Apache-2.0 — commercial use OK.** This is the differentiator: Qwen 2.1 and Ideogram 4 are non-commercial, so MOSS is the candidate for commercial-realistic deliverables.
+
+- **Rule for wiring any new model by hand:** grep its class in the live install's `comfy/supported_models.py` first — `latent_format` dictates the empty-latent node (MOSS → `latent_formats.Flux2` → `EmptyFlux2LatentImage`; wrong node = shape/validation error) and `sampling_settings` shift/multiplier are applied at model load, so no `ModelSampling*` node is needed.
+- **Claims to verify, not facts:** the launch video reports skin realism beating Qwen 2.1 and FLUX 3, but failing hard hand poses and inpainting. Until the local same-seed side-by-side (battery runner `imagenes/ab_moss/run_battery.py`: both arms' jobs launched in parallel inside the 5 s batch window — first arm first, second arm ~2 s later — same `--seed` per test for seed alignment) has run, keep Qwen 2.1 as DEFAULT and never quote MOSS wins as established.
+
 FLUX.2 Klein 9B is a distillation of FLUX.2 Dev (32B) into a compact 9B model. It inherits FLUX.2's architecture: better prompt adherence, superior text rendering, improved anatomy, and higher native resolution (4MP vs 1MP). Despite being smaller than FLUX.1 Dev (12B), it outperforms it due to the FLUX.2 architecture.
 
 Z-Image-Turbo is Alibaba Tongyi Lab's distilled 6B S3-DiT model. It uses a Qwen3-4B text encoder, AuraFlow sampling, and 8-step generation. It is the fastest installed option and performed better than FLUX.2 Klein in our Spanish text-rendering comparison.
@@ -72,6 +145,8 @@ Z-Image-Turbo is Alibaba Tongyi Lab's distilled 6B S3-DiT model. It uses a Qwen3
 For video series with recurring characters, prefer FLUX.1 Dev for character reference frames and FLUX.2 Klein for backgrounds, landscapes, text-heavy shots, and rapid iteration.
 
 ## Before calling the script
+
+**THE BROKER PAUSES THE AGENT ITSELF.** The broker stops the llama.cpp/Strata server that serves the agent's own LLM before a GPU job, then restores it after. While a job runs the agent is frozen — it CANNOT do parallel work, poll, or "use the time" for other tasks. Correct pattern: send a short confirmation message, launch the job (background=true + notify for long jobs, or just foreground with a generous timeout), END YOUR TURN, and resume when the completion notification arrives — the outputs are already on disk by then. Never interpret the silence as failure, and never schedule independent work expecting to do it during generation. (2026-10-07: Raúl had to correct this — "el broker para llama.cpp o strata, donde corres, y por tanto no puedes hacer nada mientras corre".)
 
 Always send a short confirmation message to the user. Example: `Ok, voy a generar 3 imagenes en formato 16:9 de Cocobot persiguiendo un raton. Tardara un poco.`
 
@@ -87,13 +162,15 @@ With FLUX.2 Klein 9B:
 uv run {baseDir}/scripts/generate_image.py --prompt "your image description" --filename "output.png" --model flux2-klein-9b
 ```
 
-## Generate multiple images in one broker batch
+## Generate multiple images in one broker batch — MANDATORY for any multi-image request
 
 ```bash
 uv run {baseDir}/scripts/generate_image.py --prompt "your image description" --filename "output.png" --count 3 --aspect 16:9
 ```
 
-This creates `output-1.png`, `output-2.png`, `output-3.png` and keeps all requests inside the same broker batch. Do not call the script multiple times for a multi-image request.
+This creates `output-1.png`, `output-2.png`, `output-3.png` and keeps all requests inside the same broker batch. **NEVER call the script multiple times for a multi-image request — each separate call triggers a full GPU swap cycle** (stop llama.cpp + warmup + restore ≈ 45-55s overhead per call on this setup). The broker's `_collect_batch()` groups all jobs queued within `OPENCLAW_BATCH_WAIT_SECONDS` (5s, max 20) into ONE swap: single llama stop → all jobs run with the model kept in VRAM → single restart. Verified 2026-09-21: 3 images batched = 69s wall; 3 separate calls ≈ 3.5 min.
+
+Batched-seed rule: with `--seed N` the batch uses seeds N, N+1, N+2 (base_seed + index). Same width/height/steps/guidance for the whole batch — for different sizes or models, run separate batches (one swap each), and still batch the items inside each. `--prompts-json` + `--count N` mixes prompts; same model/size constraints apply.
 
 ## Generate multiple images with different prompts
 
@@ -146,6 +223,16 @@ Broker configuration
 - `OPENCLAW_COMFYUI_LOCAL_BROKER_URL` env var
 - Optional timeout via `OPENCLAW_COMFYUI_LOCAL_TIMEOUT_SECONDS`
 - Or set `skills."comfyui-local".env.*` in `~/.openclaw/openclaw.json`
+- **Find the LIVE ComfyUI install before inspecting or installing anything:** `curl http://172.23.176.1:8791/health` returns `comfy_app_dir` = the install the broker actually runs (`E:\Comfy-Desktop\ComfyUI-Installs\ComfyUI\ComfyUI`; version in its `comfyui_version.py`, custom nodes in its `custom_nodes/`). Model weights live in `F:\ComfyUIModels` (the install's own `models/` dirs are mostly empty stubs); `C:\ComfyUI` is a second, legacy install — never assume paths from one when the health output names the other.
+- **PITFALL (2026-10-03, cost 3 lost batch runs): both scripts fall back to `DEFAULT_BROKER_URL = http://host.docker.internal:8791` when the env var is missing — and on this WSL box `host.docker.internal` resolves to `<YOUR_LAN_IP>`, which is NOT the broker (it lives on the Docker gateway `172.23.176.1:8791`). Result: every job dies with `[Errno 113] No route to host` on the first upload, while `curl`/health from a shell that HAS the env var works fine — a confusing false "network flap". The Hermes `execute_code` kernel does NOT inherit `OPENCLAW_COMFYUI_LOCAL_BROKER_URL` (it's set in the terminal shell only), so any batch launched via the kernel's `subprocess.Popen` hits the bad fallback. **Fix: always pass `--broker-url http://172.23.176.1:8791` explicitly** in every `generate_video.py`/`generate_image.py`/`generate_song.py` call from a build script or the kernel, or export the env var in the launched process's env. Verify a launch is reaching the real broker by checking the echoed command line in the log contains the correct `--broker-url`.
+
+### Installing third-party custom nodes / hand-built workflows via the broker
+
+- **Strip non-ASCII from `print()` in any new custom node before the first job.** The broker's ComfyUI console is cp1252: an emoji print raises UnicodeEncodeError, kills the execution thread, and leaves ComfyUI a zombie (GPU idle ~10%, a few GB) while the broker waits its full job timeout with Strata stopped. Fix: `perl -i.bak-cocobot -pe 's/[^\x00-\x7F]//g if /print\(/'` on the pack's .py files. If a job seems stuck: grep `Traceback|UnicodeEncodeError|OutOfMemory` in `E:\Workspace\Hermes\comfyui-process.log`, then kill the ComfyUI python (Windows `taskkill /F /PID`) so the broker closes the batch and restores Strata.
+- **Every launch/command gets an explicit timeout** (`timeout N` wrapper + background notify for jobs) and never run broad `find`/`grep` over `/mnt/c` `/mnt/e` — they hang the session for many minutes (Raúl's standing correction). Search known dirs only.
+- v3/io.Schema nodes with DynamicCombo need DOTTED keys in API JSON (`"mode": "x", "mode.width": ..`) — HTTP 500 at validation otherwise.
+- **Partial-denoise refiners (flow models):** with `SamplerCustomAdvanced` + `RandomNoise`, the sampler already mixes `x=(1-σ0)·latent+σ0·noise`. Do NOT pre-noise the latent in a custom node too — double noising leaves ~1% of the source signal and the "refine" hallucinates a new scene. Feed the clean (upscaled) latent and let sigmas[0] set strength.
+- Smoke-test new video pipelines on 5 s at 1080p before long/2K runs; 15 s at 2K of an H3-sized model can OOM the 32 GB 5090 mid-run.
 
 Edit an existing image (Flux Kontext)
 
@@ -229,10 +316,14 @@ Before calling the script, always send a short confirmation message to the user 
 ## MiniMax H3
 
 > **Detailed reference:** Before planning non-trivial H3 work—Ref2VA, continuation, editing, multiple references, dialogue, or performance tuning—read [`references/minimax-h3-guide.md`](references/minimax-h3-guide.md). It contains the official MiniMax/ComfyUI sources, mode-selection rules, prompt structures, continuation recipes, performance findings, and verification checklist.
+>
+> **Exact-audio music videos** (song-window lip-sync, keyframe gates, stem-based timing measurement, intercutting, cross-shot continuity/clothing audit, build verification): read [`references/music-video-workflow.md`](references/music-video-workflow.md) — the "H3 exact-audio" section has the measurement recipes (melisma ends via vocals-stem envelope, drum onsets via no_vocals, motion profiles, fade luma ramps, scene-detection cut checks).
 
 MiniMax H3 is the default engine because it provides substantially higher visual and audiovisual quality. `--engine minimax-h3` remains accepted when an explicit command is clearer. H3 generates native stereo audio jointly with the video and runs at a fixed 24 fps.
 
 **PDD 8-step is the default sampler (since 2026-08-31).** The script builds the workflow with the official Alibaba PAI PDD Acc LoRAs (`MiniMax-H3-{FL2VA,Ref2VA}-Acc-8Step.safetensors` in `models/pdd_acc/`, node pack `ComfyUI-MiniMax-H3-PDD-Acc`): `MiniMaxH3SigmaShift` (video 12 / audio 3) → `MiniMaxH3PDDAccApply` (nfe 8, lora 1.0, on_off_grid=error) → guider on the patched model, sampler `euler`, sigmas from the Apply node. A/B-validated on this machine: 5s FL2VA 480p 1.63×, 15s Ref2VA 1344×768 3 refs **2.23×** (914s → 410s), no visible degradation, dialogue present. **Only use the classic 20-step `res_multistep` mode when Raúl explicitly asks for it** (`--no-pdd`; keep `--steps 20`). The PDD recipe is fail-closed — the script rejects any `--steps` other than 4/6/8 while PDD is on.
+
+**Explicit-scene iteration learnings (2026-10-09, Judy rabbit series, closed by Raúl):** (1) `--reference-video` continuation cost scales with ref length: a full 15s ref video = ~160 s/step (20 steps ≈ 54 min, exceeds the broker's default 1800s timeout → HTTP 500 with misleading `last_seen=None`); trim the ref to the last ~5s and pass `--timeout-seconds 3600`. (2) Ref2VA preserves the reference composition over the prompt — posing corrections stated only in the prompt (e.g. "press pelvises together") are ignored; the pose must be fixed in the reference image itself. (3) Image-edit attempts to fix adult poses fail elsewhere too: Nano Banana/Gemini blocks the whole scene with `PROHIBITED_CONTENT` (even a neutral edit instruction on the same input), and Qwen-Image edit stretches the character's body instead of moving the partner. (4) Single-image refs with a static action photo tend to render frozen video (mean scene_score <0.002) — for motion-heavy explicit scenes use first-frame mode (`--image`, exclusive with references) or video continuation, not a far-from-action reference.
 
 H3 uses the KJNodes `MiniMaxH3MemoryEfficientSageAttentionPatch` by default. This patches only MiniMax H3 transformer blocks; it does not enable SageAttention globally or change LTX workflows. Use `--no-sage-attention` only for troubleshooting or reproducible A/B comparisons against PyTorch attention.
 
@@ -324,6 +415,24 @@ uv run {baseDir}/scripts/generate_video.py \
 - H3 presets are multiples of 32. Its `720p` preset maps to the native 1344×768 canvas.
 - Do not combine H3 with LTX-only flags such as `--audio`, `--lipsync`, or `--id-lora`.
 - The broker prepares prompts and uploads while Qwen is active, unloads llama.cpp for the GPU job, and restores the exact Qwen profile afterward.
+
+### H3 long videos — motion-context chain (`--h3-chain`)
+
+`--h3-chain N` renders N segments as ONE continuous take via the installed `ComfyUI-H3-Motion-Context` pack: each segment continues the previous one's sampler latent (picture + sound), so motion, lip state and ambience genuinely CONTINUE across joins — no cuts, no semantic reinterpretation. Use it for sustained notes/phrases >15 s, one-takes, and any commission where parts must be re-rollable independently.
+
+```bash
+uv run {baseDir}/scripts/generate_video.py --engine minimax-h3 --h3-chain 2 \
+  --prompt "<fallback prompt for every segment>" \
+  --chain-prompts-json '["prompt seg 1", "prompt seg 2"]' \
+  --duration 7.3 --resolution 720p --filename take.mp4 --seed 4242 \
+  --reference-image character.png [--reference-audio song.mp3 --preserve-reference-audio --chain-audio-start 86.38]
+```
+
+- **Lengths**: `--duration` snaps to the pack's grid-aligned sampled lengths (124/175/226/277/328 f). Segment 1 delivers the full sampled length; every later segment delivers sampled −22 frames (the pinned 0.917 s head comes off automatically, with audio matched). `--dry-run` prints the exact slot/delivery/window plan — run it before expensive chains.
+- **Slots & re-rolls**: segment k saves `output/h3_context/<chain-id>/clip_000kk.safetensors` on the server. Re-roll a bad tail WITHOUT touching approved video: same `--chain-id`, `--chain-start <slot>` (it loads that slot-1 latent). Changing an earlier slot invalidates later ones (natural chain dependency). Final file = `<filename>`; per-slot files `<filename>_slotK.mp4` are kept for review.
+- **Exact-audio chain**: `--reference-audio <MASTER> --preserve-reference-audio --chain-audio-start T0` — the script slices each segment's conditioning window (covering the SAMPLED length including the pinned 0.917 s before its delivered start — validated: mouth already correct at delivered frame 0) and muxes the final file with the master slice. Do NOT pre-slice windows yourself in this mode.
+- Prompts must follow the pack's chain rules (airlock: each segment opens on the previous closing framing with the action already running; contradictions render as unions; no first_frame except slot 1; `--end-image` applies to the LAST slot). Full rules and wiring: `references/minimax-h3-guide.md`.
+- Fixed: `context_length 22`, `audio_context_length 18`, one resolution for the whole chain, PDD default. Co-generated audio muffles slightly after ~4-5 links (irrelevant when muxing a master).
 - **Pitfall — repo/venv drift breaks ComfyUI startup (seen 2026-08-21):** ComfyUI Desktop auto-updated the repo which now imports `ColorPrimaries`/`ColorTrc` from `av.video.reformatter` (needs PyAV ≥ 17, PR #2175) while `C:\ComfyUI\.venv` still had `av 16.1.0` → broker logs `RuntimeError: ComfyUI exited during startup` and every job fails with HTTP 500. **Diagnose via the last traceback in `E:\Workspace\Hermes\comfyui-process.log`.** RESOLVED 2026-08-21:
   1. `uv pip install --python 'C:\ComfyUI\.venv\Scripts\python.exe' --upgrade 'av>=17'` → installed av 18.1.0. (cmd.exe mangles `"` quotes for uv — use PowerShell single-quotes, e.g. `powershell -NoProfile -Command "& uv pip install --python 'C:\ComfyUI\.venv\Scripts\python.exe' --upgrade 'av>=17'"`.)
   2. Bump the repo pin `E:\Comfy-Desktop\ComfyUI-Installs\ComfyUI\ComfyUI\requirements.txt`: `av>=16.0.0` → `av>=17.0.0` (the old pin let the stale venv pass checks on future upgrades).
@@ -451,8 +560,9 @@ uv run {baseDir}/scripts/generate_video.py --engine ltx23 --id-lora \
 
 **💡 ID-LoRA — Lip-sync & quality tips (tested on RTX 5090):**
 1. **Use `--identity-guidance-scale 1.5`** (not the default 3.0) — lower guidance = more facial movement while keeping voice identity
-2. **Add mouth movement to `[VISUAL]`**: "The character opens its mouth wide to speak clearly, its jaw moving with each word"
-3. **Use BF16 checkpoint** (`ltx-2.3-22b-dev.safetensors`) — the full model works fine with memory swap and produces better visuals/lip-sync than FP8. Script's `MODEL_IDLORA_CHECKPOINT` is set to BF16.
+2. Add mouth movement to `[SPEECH]`: "The character opens its mouth wide to speak clearly, their jaw moving with each syllable"
+3. Use the BF16 checkpoint (`ltx-2.3-22b-dev.safetensors`) — the full model works fine with memory swapping and produces better visuals/lip-sync than FP8. The script's `MODEL_IDLORA_CHECKPOINT` is set to BF16.
+4. Voice LoRA: only `ltx-2.3-id-lora-talkvid-3k` is installed (CelebVHQ alternative was deleted 2026-09-21 as part of the disk cleanup; re-download from Comfy-Org if better motion is ever needed).
 4. **Audio glitches at the start**: If you hear artifacts before the main speech, regenerate with a different seed — it's random and usually clears on the second try
 5. **Model location**: User models are in `F:\ComfyUIModels` (not the default ComfyUI path)
 6. **Text length**: Keep `[SPEECH]` to ~10s of spoken text. Longer text (>15s) causes truncation and garbled output. Split into multiple clips if needed.
@@ -534,10 +644,25 @@ Notes (video)
 - **CRITICAL**: Always use `exec timeout=1800` for video generation. The default exec timeout (300s) is NOT enough. LTX example: `exec timeout=1800 uv run {baseDir}/scripts/generate_video.py --engine ltx23 ...`
 - After generation, send the video with the `message` tool: `{ "action": "send", "message": "Aquí va el video", "media": "./output.mp4" }`.
 - One video per invocation. Do not batch video requests.
+- **PITFALL — existing output blocks the rename (seen 2026-10-14):** if `<filename>.mp4` ALREADY exists, `generate_video.py` saves the new render as `<filename>` WITHOUT the extension (it does not overwrite) and the `mv` guard in wrapper scripts (`[ -f X ] && [ ! -f X.mp4 ]`) silently skips — so QA can end up inspecting the OLD .mp4 while the new render rots extensionless. Always delete/rename the previous output before re-running the same `--filename`, and verify the delivered file's mtime/size matches the fresh render before judging it.
 
 ---
 
-# ComfyUI Local — Song Generation (ACE Step 1.5)
+# ComfyUI Local — H3 Still (imágenes fijas con MiniMax H3, Fizgig nodes)
+
+Instalado 2026-10-16: nodo `ComfyUI-Fizgig-H3-Still` (clonado en custom_nodes del install del broker) + `loras/minimax/minimax_h3_turbo_v4_step600_ema.safetensors` (780 MB, larryvrh repo). Reutiliza los pesos H3 de vídeo ya instalados (fl2va int8 + qwen3vl_32b nvfp4 + video VAE) — cero descargas extra.
+
+**Wiring API (probado, `imagenes/ab-h3still/battery.py` es el reference):**
+- t2i: `MiniMaxH3ImageToVideo` (clip type `minimax`, `length: 5`, LATENT sin conectar) + `FizgigH3StillLatent` (w/h múltiplos de 32) → `SamplerCustomAdvanced` con `er_sde` + `BasicScheduler simple` 20 pasos + BasicGuider cfg implícita → `FizgigH3StillDecode` → SaveImage. Turbo LoRA vía `LoraLoaderModelOnly` strength **0.38**.
+- edit: `MiniMaxH3ReferenceToVideo` con refs como clave punteada **`ref_images.ref_image_N`** en el dict de inputs (clave pelada `ref_image_1` → TypeError execute(), mismo fallo que el autogrow de Qwen). `ref_image_size: match`. Canvas edit ~2.5MP de la ratio de la foto.
+- **PITFALL validación**: `lora_name` debe llevar barra invertida Windows exacta como la lista ComfyUI: `minimax\minimax_h3_turbo_v4_step600_ema.safetensors` (con `/` falla la validación con 500).
+- Rendimiento 5090 (turbo 20 pasos): 1.3MP ~110-118 s, 2.5MP ~128-134 s imagen (warm).
+- **Edits multi-ref con animales antropomórficos**: copia muy bien pelaje/identidad (mejor que Qwen en pelaje denso), pero NO obedece cláusulas de expresión canina negativas — "jaws CLOSED, teeth NOT showing, tongue NOT visible" y "paws NOT touching" fallaron 2/2 tandas (sonrisa de jadeo + zarpa al hombro persisten). Si la expresión del keyframe debe cambiar, asumir re-rulo o aceptarla: un hocico abierto en el keyframe contamina ~1.5 s del clip hijo (H3 lip-sincroniza cualquier boca abierta en clips exact-audio).
+- **PITFALL broker (Raúl 16/10)**: lanzar los `/v1/generate` en SECUESTRA bloqueante uno-detras-de-otro → el broker para y REARRANCA Strata entre imagen e imagen (recarga enorme). Hay que lanzar todos los POSTs en paralelo dentro de la ventana de batch de 5 s (hilos/threads) para que corran en UN solo swap.
+
+**A/B vs Qwen-Image 2.1 (2026-10-16, seed 20261016, `imagenes/ab-h3still/cmp_T*.png`):** edits: H3 gana/empata (identidad T3 con pattern de camiseta casi idéntico; T4 dos identidades sin cruzar + escena de pub más rica y risas naturales). Texto ES: EMPATE perfecto (H3 escribió "FERIA DEL LIBRO / CIUDAD REAL • 23 DE AÑIL" sin un error, Ñ incluida — sorpresa). t2i fino: Qwen ligeramente delante (poros de piel, fidelidad de escena) pero H3 estaba en desventaja: solo 1.3MP y Fizgig dice que H3 rinde de 3MP arriba — retest t2i a 2.5MP pendiente. Veredicto: no es el "otra dimensión" del hype de Reddit, pero es un segundo editor serio; útil como `--model h3-still` para identidad/multi-ref/escenas si el retest grande lo confirma.
+
+## ComfyUI Local — Song Generation (ACE Step 1.5)
 
 Use the bundled script to generate songs locally through the broker on the Windows host.
 

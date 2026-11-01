@@ -58,6 +58,13 @@ H3_MODEL_FL2VA = "minimax_h3_fl2va_pruned_int8_convrot.safetensors"
 H3_MODEL_REF2VA = "minimax_h3_ref2va_pruned_int8_convrot.safetensors"
 H3_TEXT_ENCODER = "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors"
 H3_VIDEO_VAE = "minimax_h3_video_vae_fp16.safetensors"
+# int8 convrot decoder is the DEFAULT since 2026-10-06: A/B (same seed, side-by-side frames)
+# showed only subtle differences (fur micro-detail, whiskers, banding on gradients) and Raúl
+# accepted them for the ~20% faster renders. Pass --h3-vae fp16 for masters if ever needed.
+H3_VIDEO_VAE_INT8 = "minimax_h3_video_vae_int8_convrot.safetensors"
+# Veda learned sparse attention predictors (models/veda, Veda-on-ComfyUI node pack)
+H3_VEDA_PREDICTOR_T2VA = "minimax_h3_t2va_veda_8nfe_600step_preview_fp8.safetensors"
+H3_VEDA_PREDICTOR_R2VA = "minimax_h3_r2va_veda_preview_fp8.safetensors"
 H3_AUDIO_VAE = "minimax_h3_audio_vae_fp32.safetensors"
 
 # LTX 2.5 distilled (22B int8) — official two-stage pipeline from the Comfy-Org
@@ -1923,13 +1930,31 @@ def build_h3_workflow(
     ref_image_size: str = "match",
     sage_attention: bool = True,
     pdd: bool = True,
+    veda: bool = False,
+    video_vae: str = H3_VIDEO_VAE_INT8,
+    h3_lora: str | None = None,
+    h3_beta_euler: bool = False,
 ) -> dict[str, object]:
     """Build a native MiniMax H3 ComfyUI workflow in API format.
 
     pdd=True (default since 2026-08-31): Parallel Decoding Distillation 8-step
     sampler via the ComfyUI-MiniMax-H3-PDD-Acc node pack (sigma shift 12/3,
     euler, lora strength 1.0). pdd=False: classic BasicScheduler + res_multistep.
+
+    veda=True: add the VedaSparseAttention node (Veda-on-ComfyUI pack) as the
+    LAST model patch before the guider — per the node's own docs it must sit
+    after the model and any LoRA loaders. It takes over the SageAttention
+    patch's attention for sparse layers (dense layers stay on the patch), so
+    keep --sage-attention on. Predictor auto-selects R2VA vs T2VA by mode.
+
+    h3_lora: community LoRA filename (models/loras), e.g. the AfterMidnight NSFW
+    ref2va LoRA. Its author requires euler sampler + beta scheduler for correct
+    audio, so it is incompatible with PDD (fail-fast) and switches the classic
+    mode to beta/euler automatically. h3_beta_euler applies the same sampler to
+    a LoRA-less baseline run for a fair A/B.
     """
+    if h3_lora and pdd:
+        raise ValueError("--h3-lora requires --no-pdd (author recipe: euler + beta scheduler, never stacked with PDD Acc)")
     image_references = reference_images or []
     video_references = reference_videos or []
     audio_references = reference_audios or []
@@ -1946,7 +1971,12 @@ def build_h3_workflow(
         raise ValueError("H3 reference mode cannot be combined with first/last keyframes")
 
     model_name = H3_MODEL_REF2VA if has_references else H3_MODEL_FL2VA
-    model_source = ["15", 0] if sage_attention else ["1", 0]
+    if h3_lora and not has_references:
+        raise ValueError("--h3-lora (AfterMidnight pack) is a ref2va LoRA: pass at least one reference input")
+    # Optional community LoRA (e.g. AfterMidnight NSFW) applied to the base model
+    # BEFORE the SageAttention patch, per the pack's ComfyUI usage (LoraLoaderModelOnly).
+    lora_model_source = ["16", 0] if h3_lora else ["1", 0]
+    model_source = ["15", 0] if sage_attention else lora_model_source
     # PDD: the guider consumes the LoRA-patched model from the Apply node (slot 0)
     # and the sampler consumes the trained sigmas (slot 1). Without PDD both come
     # straight from the base model chain + BasicScheduler.
@@ -1975,7 +2005,7 @@ def build_h3_workflow(
         },
         "3": {
             "class_type": "VAELoader",
-            "inputs": {"vae_name": H3_VIDEO_VAE},
+            "inputs": {"vae_name": video_vae},
         },
         "4": {
             "class_type": "VAELoader",
@@ -1985,13 +2015,45 @@ def build_h3_workflow(
             {
                 "15": {
                     "class_type": "MiniMaxH3MemoryEfficientSageAttentionPatch",
-                    "inputs": {"model": ["1", 0]},
+                    "inputs": {"model": lora_model_source},
                 }
             }
             if sage_attention
             else {}
         ),
+        **(
+            {
+                "16": {
+                    "class_type": "LoraLoaderModelOnly",
+                    "inputs": {
+                        "model": ["1", 0],
+                        "lora_name": h3_lora,
+                        "strength_model": 1.0,
+                    },
+                }
+            }
+            if h3_lora
+            else {}
+        ),
     }
+
+    if veda:
+        # Veda sparse attention: LAST model patch before the guider (node docs).
+        # It takes over the SageAttention patch for the sparse layers; the
+        # trained tile budget (32/32) matches both released predictors.
+        workflow["31"] = {
+            "class_type": "VedaSparseAttention",
+            "inputs": {
+                "model": guider_model,
+                "predictor": H3_VEDA_PREDICTOR_R2VA if has_references else H3_VEDA_PREDICTOR_T2VA,
+                "generated_sparsity": "32",
+                "reference_sparsity": "32",
+                "full_attention_layers": "",
+                "full_attention_steps": "",
+                "verbose": True,
+            },
+        }
+        guider_model = ["31", 0]
 
     if has_references:
         conditioning_inputs.update(
@@ -2058,7 +2120,7 @@ def build_h3_workflow(
                     "class_type": "BasicScheduler",
                     "inputs": {
                         "model": model_source,
-                        "scheduler": "simple",
+                        "scheduler": "beta" if (h3_lora or h3_beta_euler) else "simple",
                         "steps": steps,
                         "denoise": 1.0,
                     },
@@ -2080,7 +2142,7 @@ def build_h3_workflow(
             },
             "9": {
                 "class_type": "KSamplerSelect",
-                "inputs": {"sampler_name": "euler" if pdd else "res_multistep"},
+                "inputs": {"sampler_name": "euler" if (pdd or h3_lora or h3_beta_euler) else "res_multistep"},
             },
             "10": {
                 "class_type": "SamplerCustomAdvanced",
@@ -2445,6 +2507,10 @@ def generate_video(
     ref_image_size: str = "match",
     sage_attention: bool = True,
     pdd: bool = True,
+    veda: bool = False,
+    video_vae: str = H3_VIDEO_VAE_INT8,
+    h3_lora: str | None = None,
+    h3_beta_euler: bool = False,
     preserve_reference_audio: bool = False,
     identity_guidance_scale: float = 3.0,
     original_audio_path: Path | None = None,
@@ -2492,22 +2558,29 @@ def generate_video(
             ref_image_size=ref_image_size,
             sage_attention=sage_attention,
             pdd=pdd,
+            veda=veda,
+            video_vae=video_vae,
+            h3_lora=h3_lora,
+            h3_beta_euler=h3_beta_euler,
         )
         sage_tag = "+sage" if sage_attention else "+pytorch-attention"
-        pdd_tag = "+pdd8" if pdd else "+20step"
+        pdd_tag = "+pdd8" if pdd else ("+beta-euler" if (h3_lora or h3_beta_euler) else "+20step")
+        veda_tag = "+veda" if veda else ""
+        lora_tag = f"+lora:{h3_lora.split('/')[-1][:24]}" if h3_lora else ""
+        vae_tag = "+vae-int8" if video_vae == H3_VIDEO_VAE_INT8 else ""
         if reference_images or reference_videos or h3_reference_audios:
             image_count = len(reference_images or [])
             video_count = len(reference_videos or [])
             audio_count = len(h3_reference_audios or [])
             audio_mode = "+exact-audio" if preserve_reference_audio else "+semantic-audio" if audio_count else ""
-            label = f"h3-r2v{sage_tag}{pdd_tag}{audio_mode} ({image_count} images, {video_count} videos, {audio_count} audios), seed={seed}, {width}x{height}, {frames}f"
+            label = f"h3-r2v{sage_tag}{pdd_tag}{veda_tag}{lora_tag}{vae_tag}{audio_mode} ({image_count} images, {video_count} videos, {audio_count} audios), seed={seed}, {width}x{height}, {frames}f"
         elif input_image or input_end_image:
             keyframes = "+".join(
                 name for name, present in (("first", input_image), ("last", input_end_image)) if present
             )
-            label = f"h3-i2v{sage_tag}{pdd_tag} ({keyframes}), seed={seed}, {width}x{height}, {frames}f"
+            label = f"h3-i2v{sage_tag}{pdd_tag}{veda_tag}{vae_tag} ({keyframes}), seed={seed}, {width}x{height}, {frames}f"
         else:
-            label = f"h3-t2v{sage_tag}{pdd_tag}, seed={seed}, {width}x{height}, {frames}f"
+            label = f"h3-t2v{sage_tag}{pdd_tag}{veda_tag}{vae_tag}, seed={seed}, {width}x{height}, {frames}f"
     elif id_lora and input_image and reference_audio:
         workflow = build_idlora_workflow(
             prompt=prompt,
@@ -2634,6 +2707,331 @@ def generate_video(
 # CLI
 # ---------------------------------------------------------------------------
 
+
+# ---------------------------------------------------------------------------
+# H3 motion-context chain (ComfyUI-H3-Motion-Context pack, validated 2026-10-19)
+# ---------------------------------------------------------------------------
+
+# Frame counts where the 24 fps video and 40 Hz audio grids align (17k+5).
+H3_PACK_RECOMMENDED_FRAMES = (124, 175, 226, 277, 328)
+H3_CHAIN_PIN_FRAMES = 22  # context_length 22, audio_context_length 18 (pack defaults)
+H3_CHAIN_PIN_SECONDS = H3_CHAIN_PIN_FRAMES / 24.0
+
+
+def build_h3_chain_segment(
+    workflow: dict[str, object],
+    *,
+    load_index: int,
+    save_index: int,
+    context_folder: str,
+) -> dict[str, object]:
+    """Insert MiniMaxH3MotionContext + Load/Save Latent + Trim into an H3 API workflow.
+
+    build_h3_workflow node ids: 3=video VAE, 4=audio VAE, 5=conditioning
+    (0=cond, 1=latent), 6=BasicGuider, 10=SamplerCustomAdvanced, 11=VAEDecode,
+    12=VAEDecodeAudio, 13=CreateVideo, 14=SaveVideo.
+
+    Load 0 = first segment (the node passes conditioning through; keep it wired).
+    Save and Load share the same folder, so consecutive broker jobs chain through
+    files already on the ComfyUI server (output/<context_folder>/clip_000NN.safetensors).
+    """
+    workflow["50"] = {
+        "class_type": "MiniMaxH3MotionContextLoadLatent",
+        "inputs": {"latent_path": context_folder, "clip_index": load_index},
+    }
+    workflow["51"] = {
+        "class_type": "MiniMaxH3MotionContext",
+        "inputs": {
+            "conditioning": ["5", 0],
+            "vae": ["3", 0],
+            "latent": ["5", 1],
+            "context_length": "22",
+            "audio_context_length": 18,
+            "context_latent": ["50", 0],
+        },
+    }
+    workflow["6"]["inputs"]["conditioning"] = ["51", 0]
+    workflow["52"] = {
+        "class_type": "MiniMaxH3MotionContextTrim",
+        "inputs": {
+            "images": ["11", 0],
+            "trim_frames": ["51", 1],
+            "audio": ["12", 0],
+            "fps": 24.0,
+            "match_tail": True,
+        },
+    }
+    workflow["13"]["inputs"]["images"] = ["52", 0]
+    workflow["13"]["inputs"]["audio"] = ["52", 1]
+    workflow["53"] = {
+        "class_type": "MiniMaxH3MotionContextSaveLatent",
+        "inputs": {
+            "latent": ["10", 0],
+            "filename_prefix": f"{context_folder}/clip",
+            "clip_index": save_index,
+        },
+    }
+    return workflow
+
+
+def run_h3_chain(
+    args,
+    *,
+    broker_url: str,
+    timeout_seconds: int,
+    width: int,
+    height: int,
+    uploaded_image: str | None,
+    uploaded_end_image: str | None,
+    uploaded_reference_images: list[str],
+    uploaded_reference_videos: list[str],
+) -> int:
+    """Render N H3 segments as one continuous take (motion-context chain).
+
+    Every segment after the first is conditioned on the previous segment's sampler
+    latent (picture + sound), so motion, lip state and audio CONTINUE across joins.
+    Delivered length per segment = sampled - 22 pinned frames (first: full sampled).
+    Exact-audio chain (--preserve-reference-audio + --chain-audio-start): the
+    conditioning window of each segment covers the SAMPLED length INCLUDING the
+    pinned 0.917 s before its delivered start (validated 2026-10-19: mouth already
+    correct at delivered frame 0), and the final file is muxed with the master.
+    """
+    segments = args.h3_chain
+    if segments < 2:
+        print("--h3-chain needs at least 2 segments (use the plain mode for a single clip)", file=sys.stderr)
+        return 1
+    if args.count > 1:
+        print("--h3-chain does not support --count (render the chain once)", file=sys.stderr)
+        return 1
+    if args.audio or args.lipsync or args.id_lora:
+        print("--h3-chain does not support --audio/--lipsync/--id-lora", file=sys.stderr)
+        return 1
+    if args.chain_start < 1:
+        print("--chain-start must be >= 1", file=sys.stderr)
+        return 1
+    if args.preserve_reference_audio and args.chain_audio_start is None:
+        print(
+            "--h3-chain exact-audio mode needs --chain-audio-start (seconds in the master where the "
+            "delivered start of the first rendered segment falls)",
+            file=sys.stderr,
+        )
+        return 1
+
+    chain_exact = args.preserve_reference_audio
+    master: Path | None = None
+    master_duration = 0.0
+    if chain_exact:
+        if len(args.reference_audio) != 1:
+            print("--h3-chain exact-audio mode needs exactly one --reference-audio (the master track)", file=sys.stderr)
+            return 1
+        master = Path(args.reference_audio[0])
+        if not master.exists():
+            print(f"Master audio not found: {master}", file=sys.stderr)
+            return 1
+        try:
+            master_duration = probe_media_duration(master)
+        except Exception as exc:
+            print(f"Could not inspect master audio: {exc}", file=sys.stderr)
+            return 1
+
+    prompts = [args.prompt] * segments
+    if args.chain_prompts_json:
+        raw = args.chain_prompts_json
+        candidate = Path(raw)
+        if candidate.exists():
+            raw = candidate.read_text(encoding="utf-8")
+        try:
+            extra = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            print(f"--chain-prompts-json is not valid JSON (nor an existing file): {exc}", file=sys.stderr)
+            return 1
+        if not isinstance(extra, list):
+            print("--chain-prompts-json must be a JSON list of prompts", file=sys.stderr)
+            return 1
+        for index, value in enumerate(extra[:segments]):
+            prompts[index] = str(value)
+
+    frames = min(H3_PACK_RECOMMENDED_FRAMES, key=lambda f: abs(f / 24.0 - args.duration))
+    delivered_first = frames
+    delivered_next = frames - H3_CHAIN_PIN_FRAMES
+    seed = args.seed if args.seed is not None else int(time.time() * 1000) % 2147483647
+    chain_id = args.chain_id or Path(args.filename).stem
+    context_folder = f"h3_context/{chain_id}"
+    t0 = args.chain_audio_start or 0.0
+
+    # (slot, delivered-start t, delivered frames, pin seconds) for each segment of this run
+    plan: list[tuple[int, float, int, float]] = []
+    cursor = t0
+    for index in range(segments):
+        slot = args.chain_start + index
+        is_headless_first = slot == 1  # only slot 1 has no pinned head
+        del_frames = delivered_first if is_headless_first else delivered_next
+        pin = 0.0 if is_headless_first else H3_CHAIN_PIN_SECONDS
+        plan.append((slot, cursor, del_frames, pin))
+        cursor += del_frames / 24.0
+    total_delivered = cursor - t0
+
+    sampler_tag = "PDD 8-step" if args.pdd else f"{args.steps}-step classic"
+    print(
+        f"H3 motion-context chain: {segments} segment(s), {frames}f sampled/segment @ {width}x{height} "
+        f"({sampler_tag}), slots {args.chain_start}..{args.chain_start + segments - 1} (folder {context_folder})"
+    )
+    if frames / 24.0 - args.duration > 0.4:
+        print(f"[chain] note: --duration {args.duration:.2f}s snapped UP to {frames/24.0:.2f}s sampled (grid-aligned lengths only)")
+    for slot, start, del_frames, pin in plan:
+        window = f"  audio window [{start - pin:.3f}..{start - pin + frames / 24.0:.3f}]" if chain_exact else ""
+        print(f"  slot {slot}: load {slot - 1} -> deliver {del_frames}f ({del_frames / 24.0:.3f}s) at t={start:.3f}{window}")
+    if chain_exact and master_duration < t0 + total_delivered + H3_CHAIN_PIN_SECONDS:
+        print(
+            f"Master audio too short for this chain: need >= {t0 + total_delivered + H3_CHAIN_PIN_SECONDS:.2f}s "
+            f"(got {master_duration:.2f}s)",
+            file=sys.stderr,
+        )
+        return 1
+    if args.dry_run:
+        print("Dry run: nothing sent to the broker.")
+        return 0
+
+    output_path = Path(args.filename)
+    if output_path.suffix.lower() not in VIDEO_EXTENSIONS:
+        output_path = output_path.with_suffix(".mp4")
+    output_path = output_path.resolve()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with tempfile.TemporaryDirectory(prefix="h3-chain-") as temp_dir_name:
+        temp_dir = Path(temp_dir_name)
+
+        uploaded_windows: list[str] = []
+        if chain_exact:
+            for slot, start, del_frames, pin in plan:
+                window_path = temp_dir / f"window-slot{slot}.wav"
+                try:
+                    subprocess.run(
+                        [
+                            "ffmpeg", "-y", "-v", "error",
+                            "-ss", f"{start - pin:.4f}", "-t", f"{frames / 24.0:.4f}",
+                            "-i", str(master), "-vn", "-ac", "2", "-ar", "48000",
+                            "-c:a", "pcm_s16le", str(window_path),
+                        ],
+                        check=True,
+                    )
+                except Exception as exc:
+                    print(f"Error slicing conditioning window for slot {slot}: {exc}", file=sys.stderr)
+                    return 1
+                print(f"Sliced exact-audio window for slot {slot} ({frames / 24.0:.3f}s)")
+                uploaded_windows.append(upload_file(broker_url, window_path, timeout=300))
+        else:
+            for path in args.reference_audio:
+                uploaded_windows.append(upload_file(broker_url, Path(path), timeout=300))
+
+        slot_files: list[Path] = []
+        for (slot, start, del_frames, pin), prompt in zip(plan, prompts):
+            first_slot = slot == args.chain_start
+            workflow = build_h3_workflow(
+                prompt=prompt,
+                filename_prefix=f"openclaw-local-output_{output_path.stem}-slot{slot}-{seed}",
+                width=width,
+                height=height,
+                frames=frames,
+                steps=args.steps,
+                seed=seed,
+                # --image anchors the take's FIRST frame (only meaningful on slot 1);
+                # --end-image targets the take's END (only on the last rendered slot).
+                input_image=uploaded_image if (first_slot and args.chain_start == 1) else None,
+                input_end_image=uploaded_end_image if slot == args.chain_start + segments - 1 else None,
+                reference_images=uploaded_reference_images or None,
+                reference_videos=uploaded_reference_videos or None,
+                reference_audios=uploaded_windows or None,
+                ref_image_size=args.ref_image_size,
+                sage_attention=args.sage_attention,
+                pdd=args.pdd,
+                veda=args.veda,
+                video_vae=(H3_VIDEO_VAE_INT8 if args.h3_vae == "int8" else H3_VIDEO_VAE),
+                h3_lora=args.h3_lora,
+                h3_beta_euler=args.h3_beta_euler,
+            )
+            build_h3_chain_segment(workflow, load_index=slot - 1, save_index=slot, context_folder=context_folder)
+            payload = {"workflow": workflow, "timeout_seconds": timeout_seconds}
+            print(f"\n--- chain slot {slot} (load {slot - 1}, seed {seed}) sending to broker ---")
+            started = time.time()
+            try:
+                response = request_json_with_retries(
+                    "POST", f"{broker_url}/v1/generate", payload=payload, timeout=timeout_seconds + 90
+                )
+            except Exception as exc:
+                print(f"Error talking to broker on slot {slot}: {exc}", file=sys.stderr)
+                return 1
+            if response.get("status") != "ok":
+                print(f"Broker error on slot {slot}: {json.dumps(response, ensure_ascii=False)}", file=sys.stderr)
+                return 1
+            results = response.get("results") or []
+            outputs = (results[0] if results else {}).get("outputs") or []
+            video_out = next((o for o in outputs if str(o.get("filename", "")).endswith(".mp4")), None)
+            if not video_out:
+                print(f"Slot {slot}: broker returned no mp4: {json.dumps(outputs)[:600]}", file=sys.stderr)
+                return 1
+            slot_path = output_path.with_name(f"{output_path.stem}_slot{slot}.mp4")
+            query = urlparse.urlencode(
+                {
+                    "type": video_out.get("type", "output"),
+                    "subfolder": video_out.get("subfolder", ""),
+                    "filename": video_out["filename"],
+                }
+            )
+            try:
+                download_file(f"{broker_url}/v1/file?{query}", slot_path, timeout=max(120, timeout_seconds))
+            except Exception as exc:
+                print(f"Error downloading slot {slot}: {exc}", file=sys.stderr)
+                return 1
+            print(
+                f"Slot {slot} rendered in {time.time() - started:.0f}s -> {slot_path}\n"
+                f"SOURCE_FILENAME: {video_out['filename']}"
+            )
+            slot_files.append(slot_path)
+
+        # Assemble this run: video-only concat (never -c copy on H3) + master slice when exact.
+        try:
+            total_probe = sum(probe_media_duration(p) for p in slot_files)
+        except Exception as exc:
+            print(f"Could not probe rendered slots: {exc}", file=sys.stderr)
+            return 1
+        list_path = temp_dir / "concat.txt"
+        list_path.write_text("".join(f"file '{p.resolve().as_posix()}'\n" for p in slot_files), encoding="utf-8")
+        command = [
+            "ffmpeg", "-y", "-v", "error",
+            "-f", "concat", "-safe", "0", "-i", str(list_path),
+        ]
+        if chain_exact and master:
+            command += ["-ss", f"{t0:.4f}", "-t", f"{total_probe:.4f}", "-i", str(master)]
+        else:
+            command += ["-t", f"{total_probe:.4f}"]
+        command += [
+            "-map", "0:v" if chain_exact else "0:v:0",
+            "-map", "1:a" if chain_exact else "0:a:0?",
+            "-c:v", "libx264", "-crf", "15", "-pix_fmt", "yuv420p", "-r", "24",
+            "-c:a", "aac", "-b:a", "320k" if chain_exact else "192k",
+        ]
+        if not chain_exact:
+            command += ["-ar", "48000"]
+        command.append(str(output_path))
+        try:
+            subprocess.run(command, check=True)
+        except Exception as exc:
+            print(f"Error assembling the chain: {exc}", file=sys.stderr)
+            return 1
+
+    final_duration = probe_media_duration(output_path)
+    print(
+        f"\nChain assembled: {output_path} ({final_duration:.3f}s, {len(slot_files)} segment(s)"
+        + (f", audio = master slice [{t0:.3f}..{t0 + final_duration:.3f}])" if chain_exact else ")")
+    )
+    print(
+        f"Re-roll a slot without touching the approved head: --chain-start <slot> "
+        f"(latents live in ComfyUI output/{context_folder}/clip_000NN.safetensors)"
+    )
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Generate videos locally through the ComfyUI broker (MiniMax H3, LTX 2.5 or LTX 2.3)"
@@ -2716,6 +3114,61 @@ def main() -> int:
         default=True,
         help="MiniMax H3 PDD Acc 8-step acceleration (default: enabled; use --no-pdd for the classic 20-step mode)",
     )
+    parser.add_argument(
+        "--veda",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="MiniMax H3: add Veda learned sparse attention (Veda-on-ComfyUI node pack, requires the node installed + predictor in models/veda). Stacks with --pdd and takes over the SageAttention patch; use --no-veda as the A/B baseline arm",
+    )
+    parser.add_argument(
+        "--h3-vae",
+        choices=("fp16", "int8"),
+        default="int8",
+        help="MiniMax H3 video VAE: int8_convrot (default since 2026-10-06, ~20%% faster) or fp16 (masters)",
+    )
+    parser.add_argument(
+        "--h3-lora",
+        default=None,
+        help="MiniMax H3 community LoRA filename in models/loras (ref2va only, e.g. AfterMidnight_ref2va_h3_sexytime_rank64-v1.2.safetensors). Requires --no-pdd; auto-switches classic mode to euler+beta per the pack's audio requirement",
+    )
+    parser.add_argument(
+        "--h3-beta-euler",
+        action="store_true",
+        help="Use euler sampler + beta scheduler WITHOUT a LoRA (baseline arm for a fair --h3-lora A/B; implies --no-pdd)",
+    )
+    parser.add_argument(
+        "--h3-chain",
+        type=int,
+        default=0,
+        help="MiniMax H3 motion-context chain: render this many segments (>=2) as ONE continuous take via the ComfyUI-H3-Motion-Context pack",
+    )
+    parser.add_argument(
+        "--chain-prompts-json",
+        default=None,
+        help="Per-segment prompts for --h3-chain: a JSON list, or a path to a JSON file (falls back to --prompt for missing entries)",
+    )
+    parser.add_argument(
+        "--chain-id",
+        default=None,
+        help="Chain slot folder under ComfyUI output/h3_context/ (default: output filename stem)",
+    )
+    parser.add_argument(
+        "--chain-start",
+        type=int,
+        default=1,
+        help="Slot index of the FIRST segment to render; >1 re-rolls/resumes a chain from its saved latent (default 1)",
+    )
+    parser.add_argument(
+        "--chain-audio-start",
+        type=float,
+        default=None,
+        help="Exact-audio chain: seconds in the --reference-audio master where the delivered start of the first rendered segment falls. Windows are sliced and muxed automatically. Requires --preserve-reference-audio",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="With --h3-chain: print the slot/window plan and exit without rendering",
+    )
     parser.add_argument("--seed", type=int, default=None, help="Seed for reproducibility")
     parser.add_argument("--count", "-n", type=int, default=1, help="Number of videos to generate (each with different seed)")
     parser.add_argument("--negative-prompt", default=None, help="Negative prompt (what to avoid). Appended to built-in negatives unless prefixed with !")
@@ -2724,6 +3177,12 @@ def main() -> int:
     args = parser.parse_args()
 
     is_h3 = args.engine == "minimax-h3"
+    # Community LoRA / beta-euler arms need the classic sampler chain (PDD has its
+    # own trained sigmas and stacks its own Acc LoRA — never double-stack).
+    if args.h3_lora or args.h3_beta_euler:
+        if args.pdd:
+            print("[h3] --h3-lora/--h3-beta-euler require the classic sampler: disabling PDD (euler + beta)")
+            args.pdd = False
     is_ltx25 = args.engine == "ltx25"
     if is_ltx25:
         unsupported = [
@@ -2816,6 +3275,9 @@ def main() -> int:
         os.environ.get("OPENCLAW_COMFYUI_LOCAL_TIMEOUT_SECONDS", str(DEFAULT_TIMEOUT_SECONDS))
     )
 
+    chain_mode = is_h3 and args.h3_chain > 0
+    chain_exact = chain_mode and args.preserve_reference_audio
+
     # Resolve resolution + aspect -> width x height
     preset_key = f"{args.resolution}-{args.aspect}"
     presets = H3_VIDEO_PRESETS if is_h3 else LTX25_VIDEO_PRESETS if is_ltx25 else VIDEO_PRESETS
@@ -2833,8 +3295,9 @@ def main() -> int:
         args.fps = IDLORA_DEFAULT_FPS if getattr(args, "id_lora", False) else DEFAULT_FPS
 
     # Validate H3 standalone audio references before resolving output duration.
+    # In exact-chain mode --reference-audio is the full master track (validated in the chain branch).
     reference_audio_metadata: list[tuple[Path, float]] = []
-    if is_h3:
+    if is_h3 and not chain_exact:
         total_reference_audio_duration = 0.0
         for index, reference in enumerate(args.reference_audio, start=1):
             reference_path = Path(reference)
@@ -2864,9 +3327,12 @@ def main() -> int:
             )
             return 1
 
-    requested_duration = reference_audio_metadata[0][1] if args.preserve_reference_audio else args.duration
-    if args.preserve_reference_audio:
-        print(f"Exact-audio mode: output duration follows reference audio ({requested_duration:.3f}s)")
+    if chain_exact:
+        requested_duration = args.duration
+    else:
+        requested_duration = reference_audio_metadata[0][1] if args.preserve_reference_audio else args.duration
+        if args.preserve_reference_audio:
+            print(f"Exact-audio mode: output duration follows reference audio ({requested_duration:.3f}s)")
     # Duration -> frames
     duration = max(1.0, min(requested_duration, 15.0 if is_h3 else 20.0))
     frames = h3_duration_to_frames(duration) if is_h3 else duration_to_frames(duration, args.fps)
@@ -2979,6 +3445,19 @@ def main() -> int:
             return 1
         uploaded_reference_videos.append(uploaded)
         print(f"Uploaded as <Video {index}> (paired audio if present): {uploaded}")
+
+    if chain_mode:
+        return run_h3_chain(
+            args,
+            broker_url=broker_url,
+            timeout_seconds=timeout_seconds,
+            width=width,
+            height=height,
+            uploaded_image=uploaded_image,
+            uploaded_end_image=uploaded_end_image,
+            uploaded_reference_images=uploaded_reference_images,
+            uploaded_reference_videos=uploaded_reference_videos,
+        )
 
     # Upload audio if provided
     uploaded_audio: str | None = None
@@ -3133,6 +3612,10 @@ def main() -> int:
             ref_image_size=args.ref_image_size,
             sage_attention=args.sage_attention,
             pdd=args.pdd,
+            veda=args.veda,
+            video_vae=(H3_VIDEO_VAE_INT8 if args.h3_vae == "int8" else H3_VIDEO_VAE),
+            h3_lora=args.h3_lora,
+            h3_beta_euler=args.h3_beta_euler,
             preserve_reference_audio=args.preserve_reference_audio,
             identity_guidance_scale=args.identity_guidance_scale,
             original_audio_path=replacement_audio_path,
