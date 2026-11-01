@@ -65,3 +65,7 @@ hyperframes-promo/frame_preview.jpg
 *.wav
 !scripts/assets/*.wav
 !skills/**/scripts/assets/*.wav
+
+# Residuos Windows y backups sueltos (no versionar: git guarda la historia)
+nul
+*.backup*
