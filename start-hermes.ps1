@@ -3,7 +3,8 @@
 #   .\start-hermes.ps1            -> arranca todo (llama-server + gateway + broker + ...)
 #   .\start-hermes.ps1 -LlamaOnly -> SOLO llama-server con el perfil seleccionado
 #   .\start-hermes.ps1 -Model qwen38_27b_unsloth_q6k_mtp -> usa ese modelo en este arranque (no modifica el default)
-param([switch]$LlamaOnly, [string]$Model)
+param([switch]$LlamaOnly, [string]$Model, [ValidateSet('normal','uncensored')][string]$StrataProfile)
+#   .\start-hermes.ps1 -StrataProfile uncensored -> fija y persiste el perfil de Strata (normal = sin control vector, por defecto)
 
 # ---- CONFIGURACION ----
 # Instalacion de llama.cpp: "stable" (mainline), "latest" (pruebas), "ik_llama" (fork con KV Q6_0 y MTP), "beellama" (DFlash + TurboQuant)
@@ -17,6 +18,8 @@ $useLlamaInstall = "stable"
 # default hasta que llama.cpp resuelva la corrupción del draft KV con mtmd (#27408).
 # 2026-10-04: Strata NVFP4 (Qwen3.8-Flash-Next 125B MoE, OrcaRouter uncensored, NVFP4 4.5-bit,
 # MTP integrado, low-RAM mode 64GB RAM, vision, ctx 262K, API en :8097).
+# 2026-10-17: el pack orca fue RETIRADO y sustituido por el bundle oficial qwen-nvfp4-gptq
+# (+ control vector uncensor); los ficheros de orca se borraron. Rutas en el bloque de abajo.
 $useModel = "qwen38_flashnext_nvfp4"
 if ($Model) { $useModel = $Model }
 
@@ -141,6 +144,31 @@ function Stop-Strata {
     Start-Sleep -Seconds 2
 }
 
+# --- Helper: cerrar Wallpaper Engine antes de lanzar el modelo ---
+# 2026-10-29: WE renderiza el fondo en GPU de forma continua y lastima la
+# velocidad de Strata. Se cierra con su propio '-close' (taskkill a pelo lo
+# relanza: el watchdog lo interpreta como crash).
+# 2026-10-29 v2: NO BLOQUEANTE. Se lanza '-close' y un watchdog desacoplado
+# remata: si el cierre graceful no termina en 12 s, mata SOLO los PIDs
+# capturados al irse (una instancia reabierta a mano a los pocos segundos no
+# la toca). El script principal sigue sin esperar nada.
+function Stop-WallpaperEngine {
+    $weProcs = Get-Process -Name 'wallpaper32','wallpaper64' -ErrorAction SilentlyContinue
+    if (-not $weProcs) { return }
+    Write-Host "  Cerrando Wallpaper Engine en segundo plano (libera GPU para el modelo)..." -ForegroundColor DarkCyan
+    $we = $weProcs | Where-Object { $_.Path } | Select-Object -First 1
+    if ($we) {
+        try { Start-Process $we.Path -ArgumentList '-close' -WindowStyle Hidden -ErrorAction Stop } catch {}
+    }
+    # Watchdog en cmd+taskkill (no powershell anidado: Start-Process corrompe
+    # los comillas dobles del comando al construir la linea). taskkill mata SOLO
+    # los PIDs capturados -> una instancia reabierta a mano no la toca.
+    # ping hace de sleep de ~12 s (timeout exige stdin y petaria sin consola).
+    $wePidArgs = ($weProcs | ForEach-Object { "/PID " + $_.Id }) -join ' '
+    $watchCmd = "ping -n 13 127.0.0.1 -w 1000 >nul & taskkill /F $wePidArgs >nul 2>nul"
+    try { Start-Process cmd.exe -ArgumentList '/c', $watchCmd -WindowStyle Hidden } catch {}
+}
+
 function Get-LlamaInstallInfo {
     param([string]$InstallName)
     switch ($InstallName) {
@@ -184,8 +212,8 @@ if ($useModel -eq "qwen38_27b_unsloth_q6k_mtp") {
     $modelSize     = "17.5 GB, vision+thinking"
     $ctxSize       = "100000"
 } elseif ($useModel -eq "qwen38_flashnext_nvfp4") {
-    $modelLabel    = "Qwen3.8-Flash-Next OrcaRouter NVFP4 (Strata)"
-    $modelSize     = "73.9 GB native + 63 GiB experts + 1.3 GB embd + 51 GB PLE + 1.8 GB vision, MTP integrado, low-RAM mode, ctx 262K"
+    $modelLabel    = "Qwen3.8-Flash-Next NVFP4-GPTQ (Strata)"
+    $modelSize     = "5.6 GB native + 65 GB experts (NVFP4-GPTQ) + 48 GB PLE + 1.2 GB embd + 0.8 GB MTP + 0.9 GB vision, uncensor por control vector, low-RAM mode, ctx 262K"
     $ctxSize       = "262144"
 } else {
     throw "Perfil de modelo desconocido: '$useModel'. Perfiles validos: qwen38_27b_unsloth_q6k_mtp, qwen38_27b_unsloth_q6k_dflash2, qwen38_27b_nvfp4_q8attn_mtp, gemma4, qwen38_flashnext_nvfp4."
@@ -213,6 +241,9 @@ $env:OPENCLAW_LLAMA_MTP_ENABLED = if ($useModel -in @("qwen38_27b_unsloth_q6k_mt
 $env:OPENCLAW_LLAMA_MTP_DRAFT_N_MAX = if ($useModel -in @("qwen38_27b_unsloth_q6k_mtp","qwen38_27b_nvfp4_q8attn_mtp")) { "3" } else { "2" }
 $env:OPENCLAW_LLAMA_MTP_DRAFT_P_MIN = "0"
 
+# Wallpaper Engine consume GPU en segundo plano y ralentiza la carga/inferencia
+Stop-WallpaperEngine
+
 Write-Host "[1/6] Comprobando llama-server ($modelLabel)..." -ForegroundColor Yellow
 
 $llamaRoot       = Join-Path $openclawRoot $llamaInstall.DirName
@@ -233,12 +264,13 @@ if ($useModel -eq "qwen38_27b_unsloth_q6k_mtp") {
     $mmProjFile   = Join-Path $openclawRoot "models\gemma4-31b\mmproj-BF16.gguf"
 } elseif ($useModel -eq "qwen38_flashnext_nvfp4") {
     # Strata NVFP4: no usa llama-server, usa su propio servidor en :8097
-    $modelFile    = Join-Path $openclawRoot "models\orca-nvfp4.gguf"
-    $mmProjFile   = Join-Path $openclawRoot "models\mmproj-orca-f32.gguf"
-    $pleFile      = Join-Path $openclawRoot "models\ple-fp8.gguf"
-    $embdFile     = Join-Path $openclawRoot "models\token-embd-bf16.gguf"
-    $expertsDir   = Join-Path $openclawRoot "strata-nvfp4\strata-nvfp4\pack"
-    $mtpDir       = Join-Path $openclawRoot "strata-nvfp4\strata-nvfp4\mtp-orca\rt"
+    # 2026-10-17: pack qwen-nvfp4-gptq (los ficheros de orca se eliminaron al migrar)
+    $modelFile    = Join-Path $openclawRoot "strata-nvfp4\strata-nvfp4\models\qwen-nvfp4-gptq\qwen-nvfp4-gptq-dense.gguf"
+    $mmProjFile   = Join-Path $openclawRoot "strata-nvfp4\strata-nvfp4\models\mmproj-Qwen3.8-Flash-Next-BF16.gguf"
+    $pleFile      = Join-Path $openclawRoot "strata-nvfp4\strata-nvfp4\models\qwen-nvfp4-gptq\ple-fp8.gguf"
+    $embdFile     = Join-Path $openclawRoot "strata-nvfp4\strata-nvfp4\models\qwen-nvfp4-gptq\token-embd-bf16.gguf"
+    $expertsDir   = Join-Path $openclawRoot "strata-nvfp4\strata-nvfp4\models\qwen-nvfp4-gptq\pack"
+    $mtpDir       = Join-Path $openclawRoot "strata-nvfp4\strata-nvfp4\models\qwen-nvfp4-gptq\mtp"
     $strataExe    = Join-Path $openclawRoot "strata-nvfp4\strata-nvfp4\engine\strata.exe"
     $strataConfig = Join-Path $openclawRoot "strata-nvfp4\strata-nvfp4\config\cocobot.json"
     $strataStartScript = Join-Path $openclawRoot "strata-nvfp4\strata-nvfp4\start-cocobot.cmd"
@@ -262,14 +294,25 @@ if ($useModel -eq "qwen38_27b_unsloth_q6k_mtp") {
     # largos. Valores recomendados por Qwen para thinking. Se aplican a cocobot.json en cada
     # arranque, asi tambien los usa el broker cuando relanza Strata.
     $strataSampling = [ordered]@{ temperature = 1.0; top_p = 0.95; top_k = 20 }
-    if (Test-Path $strataConfig) {
-        $cfgJson = Get-Content $strataConfig -Raw | ConvertFrom-Json
+    # 2026-10-25: perfiles Strata. config\cocobot-normal.json (sin control vector uncensor;
+    # evita la degeneracion del thinking en contexto largo) y config\cocobot-uncensored.json.
+    # El perfil activo vive en config\strata-profile.txt; start-cocobot.cmd copia el perfil
+    # a cocobot.json en CADA lanzamiento (este script y el broker) -> mismos parametros siempre.
+    $strataCfgDir = Split-Path $strataConfig
+    $strataProfileFile = Join-Path $strataCfgDir "strata-profile.txt"
+    if ($StrataProfile) { Set-Content -Path $strataProfileFile -Value $StrataProfile -NoNewline -Encoding ASCII }
+    $activeStrataProfile = if (Test-Path $strataProfileFile) { (Get-Content $strataProfileFile -Raw).Trim() } else { "normal" }
+    if (-not $activeStrataProfile) { $activeStrataProfile = "normal" }
+    Write-Host "  Perfil Strata: $activeStrataProfile" -ForegroundColor DarkCyan
+    $strataProfileConfigs = @(Get-ChildItem -Path $strataCfgDir -Filter "cocobot-*.json" -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^cocobot-(normal|uncensored)\.json$' } | ForEach-Object { $_.FullName })
+    foreach ($pcfg in $strataProfileConfigs) {
+        $cfgJson = Get-Content $pcfg -Raw | ConvertFrom-Json
         $cur = $cfgJson.sampling
         $same = $cur -and ($cur.temperature -eq $strataSampling.temperature) -and ($cur.top_p -eq $strataSampling.top_p) -and ($cur.top_k -eq $strataSampling.top_k)
         if (-not $same) {
             $cfgJson | Add-Member -NotePropertyName sampling -NotePropertyValue ([pscustomobject]$strataSampling) -Force
-            $cfgJson | ConvertTo-Json -Depth 10 | Set-Content $strataConfig -Encoding UTF8
-            Write-Host "  Strata sampling por defecto -> temp 1.0, top_p 0.95, top_k 20" -ForegroundColor DarkCyan
+            $cfgJson | ConvertTo-Json -Depth 10 | Set-Content $pcfg -Encoding UTF8
+            Write-Host "  Strata sampling por defecto -> temp 1.0, top_p 0.95, top_k 20 ($(Split-Path $pcfg -Leaf))" -ForegroundColor DarkCyan
         }
     }
 } else {
@@ -727,7 +770,12 @@ if ($useWhisper) {
 Write-Host ""
 
 # 4. Arrancar broker local para ComfyUI
-Write-Host "[3/6] Iniciando broker local de ComfyUI..." -ForegroundColor Yellow
+# 2026-11-02 (Cocobot): el broker solo se necesita para trabajo de GPU (ComfyUI / gpu-exec),
+# asi que ya NO se arranca en el boot. Bajo demanda, sin UAC:
+#   schtasks /Run /TN "Cocobot ComfyUI Broker"    (task elevada; esta es la via del agente)
+# o a mano: restart-comfyui-broker.ps1 en ventana elevada. Poner $true para el modo antiguo.
+$startBrokerOnBoot = $false
+if ($startBrokerOnBoot) { Write-Host "[3/6] Iniciando broker local de ComfyUI..." -ForegroundColor Yellow }
 $brokerScript = Find-Script "comfyui-broker.py"
 $brokerWindowScript = Find-Script "start-comfyui-broker-window.ps1"
 $brokerPython = "C:\ComfyUI\.venv\Scripts\python.exe"
@@ -735,7 +783,7 @@ $brokerLogFile = Join-Path $PSScriptRoot "comfyui-broker.log"
 $brokerModelPathsConfig = Find-Script "comfyui-extra-model-paths.yaml"
 $expectedBrokerComfyAppDir = "E:\Comfy-Desktop\ComfyUI-Installs\ComfyUI\ComfyUI"
 
-if ($brokerScript) {
+if ($startBrokerOnBoot -and $brokerScript) {
     $brokerRunning = $false
     $brokerHealth = $null
     try {
@@ -853,7 +901,8 @@ if ($brokerScript) {
     }
 }
 else {
-    Write-Host "[!] comfyui-broker.py no encontrado" -ForegroundColor Yellow
+    if ($startBrokerOnBoot) { Write-Host "[!] comfyui-broker.py no encontrado" -ForegroundColor Yellow }
+    else { Write-Host "[3/6] Broker ComfyUI: modo bajo demanda (no se arranca en boot)" -ForegroundColor DarkGray }
 }
 Write-Host ""
 
